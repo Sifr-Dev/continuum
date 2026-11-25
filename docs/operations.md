@@ -228,6 +228,15 @@ The runtime observer interface supports metrics exporters. Useful production met
 - journal append latency,
 - run duration histogram.
 
+## Capacity and backpressure
+
+Two independent bounds govern worker execution:
+
+- `concurrency` (default 4) caps forward steps executing concurrently within a single run;
+- `maxConcurrentSteps` (default 100, `--max-concurrent-steps` on the CLI worker) caps step executions across ALL runs on the worker.
+
+The global cap is the backpressure bound that matters operationally: when a node dies and its hundreds of leased runs are adopted by survivors, each survivor never executes more than its configured budget, so mass adoption cannot exhaust a replacement worker. Saturated runs wait for capacity rather than failing — capacity starvation is transient backpressure, not a scheduling deadlock. Size the budget against your steps' resource cost (memory per execution, downstream connection pools) and scale horizontally by adding workers.
+
 ## Production hardening checklist
 
 Before using Continuum for real customer-impacting workflows:

@@ -336,7 +336,14 @@ export interface StartRunOptions {
 export interface RuntimeOptions<Context = unknown> {
   journal: WorkflowJournal;
   context: Context;
+  /** Maximum forward steps executing concurrently per run. Defaults to 4. */
   concurrency?: number;
+  /**
+   * Maximum step executions concurrently across ALL runs on this worker.
+   * Defaults to 100. This is the backpressure bound that keeps mass adoption
+   * after a node failure from exhausting the replacement worker.
+   */
+  maxConcurrentSteps?: number;
   now?: () => number;
   observers?: RuntimeObserver[];
   random?: () => number;
