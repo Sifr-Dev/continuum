@@ -42,6 +42,7 @@ export class WorkflowRuntime<Context = unknown> {
   private readonly journal: WorkflowJournal;
   private readonly context: Context;
   private readonly concurrency: number;
+  private readonly maxConcurrentSteps: number;
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly observers: RuntimeObserver[];
@@ -57,11 +58,13 @@ export class WorkflowRuntime<Context = unknown> {
   private readonly wakeResolvers = new Map<string, Set<() => void>>();
   private readonly finishedRuns = new Set<string>();
   private closing = false;
+  private reservedStarts = 0;
 
   constructor(options: RuntimeOptions<Context>) {
     this.journal = options.journal;
     this.context = options.context;
     this.concurrency = Math.max(1, options.concurrency ?? 4);
+    this.maxConcurrentSteps = Math.max(1, options.maxConcurrentSteps ?? 100);
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
     this.observers = options.observers ?? [];
@@ -515,7 +518,12 @@ export class WorkflowRuntime<Context = unknown> {
         }
 
         const now = this.now();
-        let capacity = this.concurrency - active.length;
+        // Capacity is enforced with synchronous reservations: a pump reserves a
+        // slot in the same microtask it decides to start work, so concurrent
+        // pumps cannot collectively overshoot the global cap while journal
+        // writes are still in flight.
+        const globalCapacity = this.maxConcurrentSteps - this.activeTasks.size - this.reservedStarts;
+        let capacity = Math.min(this.concurrency - active.length, globalCapacity);
         let startedAny = false;
         const order = this.orderedSteps.get(`${state.workflowName}@${state.version}`) ?? topologicalOrder(definition.steps);
         const byName = new Map(definition.steps.map((step) => [step.name, step]));
@@ -567,7 +575,12 @@ export class WorkflowRuntime<Context = unknown> {
           if (waitingForSignal(stepDefinition, state)) continue;
           if (stepReadyAt(stepDefinition, state, stepState) > now) continue;
 
-          await this.startStepTask(runId, definition, stepDefinition, state, stepState);
+          this.reservedStarts += 1;
+          try {
+            await this.startStepTask(runId, definition, stepDefinition, state, stepState);
+          } finally {
+            this.reservedStarts -= 1;
+          }
           capacity -= 1;
           startedAny = true;
         }
@@ -651,6 +664,12 @@ export class WorkflowRuntime<Context = unknown> {
 
         const unfinished = Object.values(state.steps).filter((step) => step.status === "pending");
         const retryScheduled = unfinished.some((step) => step.nextAttemptAt !== undefined);
+        if (unfinished.length > 0 && this.activeTasks.size + this.reservedStarts >= this.maxConcurrentSteps) {
+          // Eligible work may simply be waiting for global capacity; saturation
+          // is transient backpressure, never a scheduling deadlock.
+          await this.waitForWake(runId, 100);
+          continue;
+        }
         const externallyWaiting = unfinished.some((stepState) => {
           const stepDefinition = byName.get(stepState.name);
           if (!stepDefinition) return false;

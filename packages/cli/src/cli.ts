@@ -19,7 +19,7 @@ Usage:
   continuum signal <run-id> <signal-name> [--payload '{"json":true}'] [--db file]
   continuum query <run-id> <query-name> --workflows module.js [--db file]
   continuum recover --workflows module.js [--db file]
-  continuum worker --workflows module.js [--db file] [--postgres url] [--lease-ttl ms] [--metrics-port port] [--shutdown-grace ms]
+  continuum worker --workflows module.js [--db file] [--postgres url] [--lease-ttl ms] [--metrics-port port] [--shutdown-grace ms] [--max-concurrent-steps n]
   continuum leases [--db file] [--postgres url]
   continuum export [--db file] [--out file]
 
@@ -51,6 +51,8 @@ async function main(argv: string[]): Promise<number> {
       "lease-ttl": { type: "string" },
       shutdownGrace: { type: "string" },
       "shutdown-grace": { type: "string" },
+      maxConcurrentSteps: { type: "string" },
+      "max-concurrent-steps": { type: "string" },
       metricsPort: { type: "string" },
       "metrics-port": { type: "string" },
       events: { type: "boolean", default: false },
@@ -60,11 +62,13 @@ async function main(argv: string[]): Promise<number> {
 
   const leaseTtl = values["lease-ttl"] ?? values.leaseTtl;
   const metricsPort = values["metrics-port"] ?? values.metricsPort;
+  const maxConcurrentSteps = values["max-concurrent-steps"] ?? values.maxConcurrentSteps;
   const journal = createJournal(values.postgres ? String(values.postgres) : undefined, resolve(String(values.db)));
   const runtime = new WorkflowRuntime({
     journal,
     context: {},
     ...(leaseTtl ? { leaseTtlMs: Number(leaseTtl) } : {}),
+    ...(maxConcurrentSteps ? { maxConcurrentSteps: Number(maxConcurrentSteps) } : {}),
   });
 
   try {
