@@ -1,4 +1,5 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { mkdir, readFile } from "node:fs/promises";
 import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,9 +15,14 @@ const dataDir = resolve(process.env.CONTINUUM_DATA_DIR ?? join(process.cwd(), ".
 const port = Number(process.env.PORT ?? 4173);
 const host = process.env.HOST ?? "127.0.0.1";
 const operatorToken = process.env.CONTINUUM_OPERATOR_TOKEN?.trim() || undefined;
+const tlsKeyPath = process.env.CONTINUUM_TLS_KEY_FILE;
+const tlsCertPath = process.env.CONTINUUM_TLS_CERT_FILE;
 const loopbackHost = host === "127.0.0.1" || host === "localhost" || host === "::1";
-if (!loopbackHost && !operatorToken) {
-  throw new Error("Refusing to expose the operations demo without CONTINUUM_OPERATOR_TOKEN");
+if ((tlsKeyPath && !tlsCertPath) || (!tlsKeyPath && tlsCertPath)) {
+  throw new Error("CONTINUUM_TLS_KEY_FILE and CONTINUUM_TLS_CERT_FILE must be configured together");
+}
+if (!loopbackHost && (!operatorToken || !tlsKeyPath || !tlsCertPath)) {
+  throw new Error("Refusing direct non-loopback exposure without CONTINUUM_OPERATOR_TOKEN and TLS key/certificate files");
 }
 
 await mkdir(dataDir, { recursive: true });
@@ -31,7 +37,7 @@ if (recovered.length > 0) {
   console.log(`Recovered ${recovered.length} interrupted workflow run(s): ${recovered.join(", ")}`);
 }
 
-const server = createServer(async (request, response) => {
+const requestHandler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
   try {
     await route(request, response);
   } catch (error) {
@@ -39,10 +45,15 @@ const server = createServer(async (request, response) => {
       error: error instanceof Error ? error.message : String(error),
     });
   }
-});
+};
+
+const server = tlsKeyPath && tlsCertPath
+  ? createHttpsServer({ key: await readFile(tlsKeyPath), cert: await readFile(tlsCertPath) }, requestHandler)
+  : createHttpServer(requestHandler);
+const protocol = tlsKeyPath ? "https" : "http";
 
 server.listen(port, host, () => {
-  console.log(`Continuum order-system demo listening on http://${host}:${port}`);
+  console.log(`Continuum order-system demo listening on ${protocol}://${host}:${port}`);
 });
 
 process.on("SIGINT", shutdown);
@@ -55,7 +66,7 @@ async function shutdown(): Promise<void> {
 }
 
 async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
-  const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+  const url = new URL(request.url ?? "/", `${protocol}://${request.headers.host ?? "localhost"}`);
   const method = request.method ?? "GET";
 
   if (operatorToken && url.pathname.startsWith("/api/") && !authorizedOperator(request, operatorToken)) {
