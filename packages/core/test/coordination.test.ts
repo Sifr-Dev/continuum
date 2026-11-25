@@ -19,6 +19,7 @@ test("conditional steps skip without blocking downstream work", async () => {
     name: "conditional",
     needs: ["first"],
     sideEffect: false,
+    waitForSignal: "unused.review",
     when: ({ input }) => input.enabled,
     execute: () => "should-not-run",
   });
@@ -133,6 +134,58 @@ test("child workflow retries reattach to the deterministic child run", async () 
   assert.equal(childExecutions, 1);
   assert.equal(parentAttempts, 2);
   assert.equal((await runtime.getRun("parent-run:parent-child-step"))?.status, "succeeded");
+});
+
+
+test("recovery adopts a deferred run when a dead worker lease expires", async () => {
+  const journal = new MemoryJournal();
+  const step = defineStep<{}, string>({ name: "work", execute: () => "done" });
+  const workflow = defineWorkflow<{}, [typeof step]>({ name: "lease-expiry-recovery", version: 1, steps: [step] });
+  const runtime = new WorkflowRuntime({ journal, context: {}, workerId: "replacement", random: () => 0.5 });
+
+  const runId = await runtime.startWorkflow(workflow, {}, { defer: true });
+  const deadWorkerLease = await journal.acquireRunLease(runId, "dead-worker", 35);
+  assert.ok(deadWorkerLease);
+  assert.deepEqual(await runtime.recover(), []);
+
+  const state = await runtime.waitForRun(runId);
+  assert.equal(state.status, "succeeded");
+  assert.deepEqual(state.output, { work: "done" });
+});
+
+test("reattaching to a deferred child workflow starts its pump", async () => {
+  const journal = new MemoryJournal();
+  const childStep = defineStep<{ value: number }, number>({ name: "child-work", execute: ({ input }) => input.value });
+  const childWorkflow = defineWorkflow<{ value: number }, [typeof childStep]>({
+    name: "deferred-child",
+    version: 1,
+    steps: [childStep],
+    output: ({ outputs }) => outputs["child-work"],
+  });
+  const parentStep = defineStep<{}, number>({
+    name: "parent",
+    execute: ({ startChildWorkflow }) => startChildWorkflow<{ value: number }, number>(childWorkflow, { value: 9 }),
+  });
+  const parentWorkflow = defineWorkflow<{}, [typeof parentStep]>({
+    name: "deferred-child-parent",
+    version: 1,
+    steps: [parentStep],
+    output: ({ outputs }) => outputs.parent,
+  });
+  const runtime = new WorkflowRuntime({ journal, context: {}, random: () => 0.5 });
+  await runtime.startWorkflow(childWorkflow, { value: 9 }, {
+    runId: "parent-run:parent",
+    defer: true,
+  });
+
+  const parentRunId = await runtime.startWorkflow(parentWorkflow, {}, {
+    runId: "parent-run",
+  });
+  const state = await runtime.waitForRun(parentRunId);
+
+  assert.equal(state.status, "succeeded");
+  assert.equal(state.output, 9);
+  assert.equal((await runtime.getRun("parent-run:parent"))?.status, "succeeded");
 });
 
 test("deterministic interval schedules are duplicate-safe across workers", async () => {

@@ -52,6 +52,7 @@ export class WorkflowRuntime<Context = unknown> {
   private readonly reverseOrderedSteps = new Map<string, string[]>();
   private readonly activeTasks = new Map<string, ActiveTask>();
   private readonly activeLeases = new Map<string, RunLease>();
+  private readonly recoveryTimers = new Map<string, NodeJS.Timeout>();
   private readonly pumping = new Set<string>();
   private readonly wakeResolvers = new Map<string, Set<() => void>>();
   private readonly finishedRuns = new Set<string>();
@@ -162,16 +163,29 @@ export class WorkflowRuntime<Context = unknown> {
     const leases = new Map((await this.journal.listRunLeases?.() ?? []).map((lease) => [lease.runId, lease]));
     const wallNow = Date.now();
     for (const runId of await this.journal.runIds()) {
-      const lease = leases.get(runId);
-      if (lease && lease.expiresAt > wallNow && lease.workerId !== this.workerId) continue;
       const state = await this.getRun(runId);
       if (!state || isTerminalRunStatus(state.status)) continue;
       const key = `${state.workflowName}@${state.version}`;
       if (!this.definitions.has(key)) continue;
+      const lease = leases.get(runId);
+      if (lease && lease.expiresAt > wallNow) {
+        this.scheduleLeaseRecovery(runId, lease.expiresAt - wallNow);
+        continue;
+      }
       recovered.push(runId);
       this.pumpInBackground(runId);
     }
     return recovered;
+  }
+
+  private scheduleLeaseRecovery(runId: string, delayMs: number): void {
+    if (this.recoveryTimers.has(runId)) return;
+    const timer = setTimeout(() => {
+      this.recoveryTimers.delete(runId);
+      this.pumpInBackground(runId);
+    }, Math.max(1, delayMs + 1));
+    timer.unref?.();
+    this.recoveryTimers.set(runId, timer);
   }
 
   async startDueScheduledWorkflows(now = Date.now()): Promise<string[]> {
@@ -282,6 +296,8 @@ export class WorkflowRuntime<Context = unknown> {
   }
 
   async close(): Promise<void> {
+    for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
+    this.recoveryTimers.clear();
     for (const task of this.activeTasks.values()) {
       task.controller.abort(new RunCancelledError("runtime shutdown"));
     }
@@ -390,8 +406,6 @@ export class WorkflowRuntime<Context = unknown> {
           if (stepState.status !== "pending") continue;
           if ((stepState.nextAttemptAt ?? 0) > now) continue;
           if (!stepState.needs.every((dependency) => ["succeeded", "skipped"].includes(state.steps[dependency]?.status ?? ""))) continue;
-          if (waitingForSignal(stepDefinition, state)) continue;
-          if (stepReadyAt(stepDefinition, state, stepState) > now) continue;
 
           if (stepDefinition.when) {
             let condition = false;
@@ -428,6 +442,9 @@ export class WorkflowRuntime<Context = unknown> {
             }
           }
 
+          if (waitingForSignal(stepDefinition, state)) continue;
+          if (stepReadyAt(stepDefinition, state, stepState) > now) continue;
+
           await this.startStepTask(runId, definition, stepDefinition, state, stepState);
           capacity -= 1;
           startedAny = true;
@@ -456,7 +473,7 @@ export class WorkflowRuntime<Context = unknown> {
             }
             return times;
           })
-          .filter((time) => time > this.now())
+          .filter((time) => time > now)
           .sort((a, b) => a - b)[0];
 
         if (nextScheduledAt !== undefined) {
@@ -515,7 +532,7 @@ export class WorkflowRuntime<Context = unknown> {
         const externallyWaiting = unfinished.some((stepState) => {
           const stepDefinition = byName.get(stepState.name);
           if (!stepDefinition) return false;
-          return waitingForSignal(stepDefinition, state) || stepReadyAt(stepDefinition, state, stepState) > this.now();
+          return waitingForSignal(stepDefinition, state) || stepReadyAt(stepDefinition, state, stepState) > now;
         });
         if (unfinished.length > 0 && externallyWaiting) {
           await this.waitForWake(runId, 1_000);
@@ -685,6 +702,8 @@ export class WorkflowRuntime<Context = unknown> {
       });
     } catch (error) {
       if (!(error instanceof RunAlreadyExistsError && error.details?.runId === childRunId)) throw error;
+      this.registerWorkflow(definition);
+      this.pumpInBackground(childRunId);
     }
 
     const propagateCancellation = options.cancelWithParent !== false;
