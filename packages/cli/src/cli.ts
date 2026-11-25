@@ -115,7 +115,8 @@ async function main(argv: string[]): Promise<number> {
         const workflows = await loadWorkflows(required(values.workflows, "--workflows is required for recover"));
         for (const workflow of workflows) runtime.registerWorkflow(workflow);
         const recovered = await runtime.recover();
-        console.log(json({ recovered, count: recovered.length }));
+        const states = await Promise.all(recovered.map((runId) => runtime.waitForRun(runId)));
+        console.log(json({ recovered, count: recovered.length, statuses: states.map((state) => ({ runId: state.runId, status: state.status })) }));
         return 0;
       }
 
@@ -141,8 +142,13 @@ async function main(argv: string[]): Promise<number> {
       case "export": {
         const events = await journal.allEvents();
         const payload = json({ exportedAt: new Date().toISOString(), events });
-        if (values.out) await writeFile(String(values.out), `${payload}\n`, "utf8");
-        else console.log(payload);
+        if (values.out) {
+          const outPath = resolve(String(values.out));
+          if (outPath === resolve(String(values.db))) throw new Error("export output must not overwrite the journal database");
+          await writeFile(outPath, `${payload}\n`, "utf8");
+        } else {
+          console.log(payload);
+        }
         return 0;
       }
 
