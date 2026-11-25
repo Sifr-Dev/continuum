@@ -47,17 +47,21 @@ async function main(argv: string[]): Promise<number> {
       postgres: { type: "string" },
       payload: { type: "string" },
       leaseTtl: { type: "string" },
+      "lease-ttl": { type: "string" },
       metricsPort: { type: "string" },
+      "metrics-port": { type: "string" },
       events: { type: "boolean", default: false },
       wait: { type: "boolean", default: false },
     },
   });
 
+  const leaseTtl = values["lease-ttl"] ?? values.leaseTtl;
+  const metricsPort = values["metrics-port"] ?? values.metricsPort;
   const journal = createJournal(values.postgres ? String(values.postgres) : undefined, resolve(String(values.db)));
   const runtime = new WorkflowRuntime({
     journal,
     context: {},
-    ...(values.leaseTtl ? { leaseTtlMs: Number(values.leaseTtl) } : {}),
+    ...(leaseTtl ? { leaseTtlMs: Number(leaseTtl) } : {}),
   });
 
   try {
@@ -151,8 +155,8 @@ async function main(argv: string[]): Promise<number> {
         for (const workflow of workflows) runtime.registerWorkflow(workflow);
         const initiallyRecovered = await runtime.recover();
         console.log(`continuum worker ${runtime.getWorkerId()} online; recovered ${initiallyRecovered.length} run(s)`);
-        const metricsServer = values.metricsPort
-          ? await startMetricsServer(runtime, journal, Number(values.metricsPort))
+        const metricsServer = metricsPort
+          ? await startMetricsServer(runtime, journal, Number(metricsPort))
           : undefined;
         let tickRunning = false;
         const tick = async () => {
