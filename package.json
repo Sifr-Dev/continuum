@@ -12,7 +12,8 @@
     "build": "npm run build --workspace @continuum/core && npm run build --workspace @continuum/sqlite && npm run build --workspace @continuum/postgres && npm run build --workspace @continuum/cli && npm run build --workspace @continuum/order-system-demo",
     "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run build --workspace @continuum/core && npm run build --workspace @continuum/sqlite && npm run build --workspace @continuum/postgres && npm run typecheck --workspaces --if-present",
-    "demo": "npm run dev --workspace @continuum/order-system-demo"
+    "demo": "npm run dev --workspace @continuum/order-system-demo",
+    "bench": "npm run bench --workspace @continuum/bench"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

@@ -1,0 +1,16 @@
+{
+  "name": "@continuum/bench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "tsx src/run.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@continuum/core": "0.1.0",
+    "@continuum/postgres": "0.1.0",
+    "@continuum/sqlite": "0.1.0"
+  }
+}
