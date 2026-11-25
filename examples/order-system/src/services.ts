@@ -105,26 +105,26 @@ export class DemoServices {
     this.log("inventory.released", key, reservation.reservationId);
   }
 
-  chargePayment(key: string, order: OrderInput): Promise<Payment> {
+  chargePayment(key: string, order: OrderInput, signal?: AbortSignal): Promise<Payment> {
     const existing = this.paymentsByKey.get(key);
     if (existing) return Promise.resolve(existing);
     const inFlight = this.paymentInFlight.get(key);
     if (inFlight) return inFlight;
 
-    const capture = this.performChargePayment(key, order);
+    const capture = this.performChargePayment(key, order, signal);
     this.paymentInFlight.set(key, capture);
     capture.finally(() => this.paymentInFlight.delete(key)).catch(() => undefined);
     return capture;
   }
 
-  private async performChargePayment(key: string, order: OrderInput): Promise<Payment> {
+  private async performChargePayment(key: string, order: OrderInput, signal?: AbortSignal): Promise<Payment> {
     const attempts = (this.paymentAttempts.get(key) ?? 0) + 1;
     this.paymentAttempts.set(key, attempts);
 
     if (order.chaos === "slow-payment" && attempts === 1) {
-      await delay(1_500);
+      await delay(1_500, signal);
     } else {
-      await delay(180);
+      await delay(180, signal);
     }
 
     if (order.chaos === "flaky-payment" && attempts < 3) {
@@ -243,6 +243,20 @@ function stableId(input: string): string {
   return (hash >>> 0).toString(36);
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error("operation aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }

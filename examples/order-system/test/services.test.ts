@@ -23,6 +23,16 @@ test("concurrent payment attempts share one in-flight capture", async () => {
   assert.equal(services.effectLog().filter((entry) => entry.type === "payment.captured").length, 1);
 });
 
+test("aborting a slow payment prevents a late capture", async () => {
+  const services = new DemoServices();
+  const controller = new AbortController();
+  const capture = services.chargePayment("cancelled-payment-key", order, controller.signal);
+  controller.abort(new Error("cancelled"));
+
+  await assert.rejects(capture, /cancelled/);
+  assert.equal(services.effectLog().filter((entry) => entry.type === "payment.captured").length, 0);
+});
+
 test("event restore preserves uncompensated inventory reservations across restarts", () => {
   const services = new DemoServices();
   const before = services.inventorySnapshot()["sku-mouse"] ?? 0;
