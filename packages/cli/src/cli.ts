@@ -17,6 +17,7 @@ Usage:
   continuum start <workflow[@version]> --workflows module.js --input '{"json":true}' [--db file] [--wait]
   continuum cancel <run-id> [--db file] [--workflows module.js] [--reason text]
   continuum signal <run-id> <signal-name> [--payload '{"json":true}'] [--db file]
+  continuum query <run-id> <query-name> --workflows module.js [--db file]
   continuum recover --workflows module.js [--db file]
   continuum worker --workflows module.js [--db file] [--postgres url] [--lease-ttl ms] [--metrics-port port]
   continuum leases [--db file] [--postgres url]
@@ -122,6 +123,15 @@ async function main(argv: string[]): Promise<number> {
         const payload = values.payload ? JSON.parse(String(values.payload)) : null;
         await runtime.signalRun(runId, signalName, payload);
         console.log(`Signal ${signalName} recorded for ${runId}`);
+        return 0;
+      }
+
+      case "query": {
+        const [runId, queryName] = positionals;
+        if (!runId || !queryName) throw new Error("query requires a run id and query name");
+        const workflows = await loadWorkflows(required(values.workflows, "--workflows is required for query"));
+        for (const workflow of workflows) runtime.registerWorkflow(workflow);
+        console.log(json(await runtime.queryWorkflow(runId, queryName)));
         return 0;
       }
 

@@ -20,6 +20,17 @@ export function validateWorkflow(definition: AnyWorkflowDefinition): string[] {
     }
   }
 
+  if (definition.queries !== undefined) {
+    for (const [queryName, handler] of Object.entries(definition.queries)) {
+      if (!queryName) {
+        throw new WorkflowValidationError("Workflow query names must be non-empty strings", { workflow: definition.name });
+      }
+      if (typeof handler !== "function") {
+        throw new WorkflowValidationError(`Workflow query "${queryName}" must be a function`, { workflow: definition.name });
+      }
+    }
+  }
+
   const seen = new Set<string>();
   const graph = new Map<string, readonly string[]>();
 

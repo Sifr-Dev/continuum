@@ -114,6 +114,21 @@ export interface WorkflowSchedule<Input = unknown> {
   metadata?: JsonObject;
 }
 
+/**
+ * A pure, synchronous read of projected run state, evaluated on demand against
+ * the journal. Queries never mutate anything and never replay user code, so
+ * they are safe to call at any time — including while the run is live on a
+ * different worker.
+ */
+export type WorkflowQuery<Input = unknown, Outputs = Record<string, unknown>> = (args: {
+  input: Input;
+  outputs: Readonly<Partial<Outputs>>;
+  signals: Readonly<Record<string, unknown>>;
+  status: RunStatus;
+  steps: Readonly<Record<string, StepState>>;
+  runId: string;
+}) => unknown;
+
 export interface WorkflowDefinition<
   Input = unknown,
   Outputs = Record<string, unknown>,
@@ -126,6 +141,8 @@ export interface WorkflowDefinition<
   validateInput?: (input: unknown) => Input;
   schedule?: WorkflowSchedule<Input>;
   output?: (args: { input: Input; outputs: Readonly<Partial<Outputs>>; runId: string }) => unknown;
+  /** Named pure read-only queries over projected run state. */
+  queries?: Record<string, WorkflowQuery<Input, Outputs>>;
 }
 
 export type AnyWorkflowDefinition = WorkflowDefinition<any, any, any>;

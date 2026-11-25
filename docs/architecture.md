@@ -133,6 +133,16 @@ Because eligibility is derived from the journal rather than memory, recovery use
 
 `when` is evaluated after ordering dependencies complete. A false result records `step.skipped` with `conditional: true`. Downstream ordering dependencies treat conditional skips as satisfied. Application steps that need an output should declare their data dependency explicitly and handle the absent output.
 
+### Queries
+
+Workflows may declare named `queries`: pure functions of projected run state (`input`, step `outputs`, `signals`, `status`, `steps`) evaluated on demand. Queries never mutate the journal, never replay step code, and are safe to evaluate from any process — including while a different worker owns the run. Results must be JSON-serializable.
+
+```ts
+const state = await runtime.queryWorkflow(runId, "orderStatus");
+```
+
+Because eligibility and outputs are journal projections rather than in-memory worker state, query results are consistent for any observer that can read the journal; no connection to the owning worker is required. The CLI exposes them as `continuum query <run-id> <name> --workflows module.js`.
+
 ### Child workflows
 
 `startChildWorkflow` uses a deterministic child run ID (`parentRunId:parentStepName` by default). If the parent worker crashes or retries, the helper catches the duplicate-run conflict and reattaches to the existing child instead of starting another one. Optional parent-interrupt cancellation propagation is enabled by default.

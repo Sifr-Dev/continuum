@@ -277,6 +277,42 @@ export class WorkflowRuntime<Context = unknown> {
     return projectRun(await this.journal.events(runId));
   }
 
+  /**
+   * Evaluates a pure query handler against the current projected run state.
+   * Safe to call on live runs and from any process: queries read the journal
+   * projection, never mutate state, and never replay step code.
+   */
+  async queryWorkflow(runId: string, queryName: string): Promise<unknown> {
+    const state = await this.getRun(runId);
+    if (!state) throw new Error(`Run "${runId}" does not exist`);
+    const definition = this.definitions.get(`${state.workflowName}@${state.version}`);
+    if (!definition) {
+      throw new Error(`Workflow "${state.workflowName}@${state.version}" is not registered in this runtime`);
+    }
+    const handler = definition.queries?.[queryName];
+    if (!handler) {
+      const available = Object.keys(definition.queries ?? {});
+      throw new Error(
+        `Workflow "${state.workflowName}" has no query "${queryName}"` +
+          (available.length > 0 ? `; available: ${available.join(", ")}` : ""),
+      );
+    }
+    const outputs: Record<string, unknown> = {};
+    for (const step of Object.values(state.steps)) {
+      if (step.output !== undefined) outputs[step.name] = step.output;
+    }
+    const result = handler({
+      input: state.input,
+      outputs,
+      signals: state.signals,
+      status: state.status,
+      steps: state.steps,
+      runId: state.runId,
+    });
+    assertJsonCompatible(result, `result of query "${queryName}"`);
+    return result;
+  }
+
   async getEvents(runId: string): Promise<ContinuumEvent[]> {
     return this.journal.events(runId);
   }
