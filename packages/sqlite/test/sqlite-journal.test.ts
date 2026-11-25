@@ -40,6 +40,21 @@ test("persists event history across journal instances", async () => {
   }
 });
 
+test("rejects duplicate run creation atomically", async () => {
+  const journal = SqliteJournal.memory();
+  const created = {
+    runId: "duplicate",
+    workflowName: "workflow",
+    type: "run.created" as const,
+    data: { workflowName: "workflow", version: 1, input: {}, steps: [] },
+  };
+
+  await journal.append([created]);
+  await assert.rejects(() => journal.append([created]), /already exists/);
+  assert.equal((await journal.events("duplicate")).filter((event) => event.type === "run.created").length, 1);
+  await journal.close();
+});
+
 test("recovers an interrupted run from a reopened SQLite journal", async () => {
   const directory = mkdtempSync(join(tmpdir(), "continuum-sqlite-"));
   const filename = join(directory, "events.db");
