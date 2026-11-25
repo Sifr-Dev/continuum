@@ -19,7 +19,7 @@ Usage:
   continuum signal <run-id> <signal-name> [--payload '{"json":true}'] [--db file]
   continuum query <run-id> <query-name> --workflows module.js [--db file]
   continuum recover --workflows module.js [--db file]
-  continuum worker --workflows module.js [--db file] [--postgres url] [--lease-ttl ms] [--metrics-port port]
+  continuum worker --workflows module.js [--db file] [--postgres url] [--lease-ttl ms] [--metrics-port port] [--shutdown-grace ms]
   continuum leases [--db file] [--postgres url]
   continuum export [--db file] [--out file]
 
@@ -49,6 +49,8 @@ async function main(argv: string[]): Promise<number> {
       payload: { type: "string" },
       leaseTtl: { type: "string" },
       "lease-ttl": { type: "string" },
+      shutdownGrace: { type: "string" },
+      "shutdown-grace": { type: "string" },
       metricsPort: { type: "string" },
       "metrics-port": { type: "string" },
       events: { type: "boolean", default: false },
@@ -192,6 +194,10 @@ async function main(argv: string[]): Promise<number> {
           process.once("SIGTERM", resolve);
         });
         clearInterval(interval);
+        const graceRaw = values["shutdown-grace"] ?? values.shutdownGrace;
+        const graceMs = graceRaw ? Number(graceRaw) : 5_000;
+        console.log(`continuum worker draining in-flight work (grace ${graceMs}ms)...`);
+        await runtime.close({ graceMs });
         if (metricsServer) await new Promise<void>((resolveClose) => metricsServer.close(() => resolveClose()));
         console.log("continuum worker stopped");
         return 0;

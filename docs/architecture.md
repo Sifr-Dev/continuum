@@ -270,6 +270,10 @@ Workflow identity is `name@version`. Recovery requires the exact version to be r
 
 Automatic migration of in-flight runs is future work because adding, renaming, reordering, or changing conditional logic alters the meaning of replayed events.
 
+## Worker lifecycle
+
+Graceful shutdown is a bounded drain, distinct from a crash: in-flight steps finish and journal their outcomes within the grace window, remaining tasks are aborted, leases are released for immediate adoption, and non-cooperative tasks are abandoned to fencing rather than allowed to hang the shutdown. Crashes differ only in skipping the drain — the same interruption recovery path converges both.
+
 ## Design invariants
 
 1. **Journal before execution.** A step is never invoked before its start event is durable.

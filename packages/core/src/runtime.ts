@@ -56,6 +56,7 @@ export class WorkflowRuntime<Context = unknown> {
   private readonly pumping = new Set<string>();
   private readonly wakeResolvers = new Map<string, Set<() => void>>();
   private readonly finishedRuns = new Set<string>();
+  private closing = false;
 
   constructor(options: RuntimeOptions<Context>) {
     this.journal = options.journal;
@@ -86,6 +87,7 @@ export class WorkflowRuntime<Context = unknown> {
     input: Input,
     options: StartRunOptions = {},
   ): Promise<string> {
+    if (this.closing) throw new Error("Runtime is shutting down; not accepting new workflow runs");
     this.registerWorkflow(definition);
     const runId = options.runId ?? randomUUID();
     const existing = await this.journal.events(runId);
@@ -336,13 +338,47 @@ export class WorkflowRuntime<Context = unknown> {
     }
   }
 
-  async close(): Promise<void> {
+  /**
+   * Shuts the worker down. In-flight steps first get `graceMs` to finish and
+   * journal their outcomes — a deploy should not turn healthy work into crash
+   * recovery. Once drained (or the grace period expires), remaining tasks are
+   * aborted, run leases are released so other workers can adopt immediately
+   * instead of waiting for lease expiry, and the journal is closed.
+   */
+  async close(options?: { graceMs?: number }): Promise<void> {
+    const graceMs = Math.max(0, options?.graceMs ?? 5_000);
+    this.closing = true;
+    for (const runId of this.pumping) this.wake(runId);
+
+    const deadline = Date.now() + graceMs;
+    while (this.activeTasks.size > 0 && Date.now() < deadline) {
+      await sleep(10);
+    }
     for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
     this.recoveryTimers.clear();
     for (const task of this.activeTasks.values()) {
       task.controller.abort(new RunCancelledError("runtime shutdown"));
     }
-    await Promise.allSettled([...this.activeTasks.values()].map((task) => task.promise));
+    // JavaScript cannot forcefully stop non-cooperative user code, so abandon
+    // tasks that ignore the abort after a bounded window instead of hanging
+    // the deploy. Their journal writes become fenced no-ops once the lease is
+    // released, and the surviving step.started records are recoverable.
+    await Promise.race([
+      Promise.allSettled([...this.activeTasks.values()].map((task) => task.promise)),
+      sleep(1_000),
+    ]);
+    // Abandon anything still running so pumps can exit and release leases.
+    // Fencing turns late zombie writes into rejected no-ops.
+    for (const [key, task] of [...this.activeTasks.entries()]) {
+      this.activeTasks.delete(key);
+      this.wake(task.runId);
+    }
+
+    const pumpDeadline = Date.now() + 2_000;
+    while (this.pumping.size > 0 && Date.now() < pumpDeadline) {
+      for (const runId of this.pumping) this.wake(runId);
+      await sleep(10);
+    }
     await this.journal.close?.();
   }
 
@@ -405,6 +441,12 @@ export class WorkflowRuntime<Context = unknown> {
 
       for (;;) {
         if (leaseLost) return;
+        if (this.closing) {
+          const hasActiveWork = [...this.activeTasks.values()].some((task) => task.runId === runId);
+          if (!hasActiveWork) return;
+          await this.waitForWake(runId, 100);
+          continue;
+        }
         const state = await this.getRun(runId);
         if (!state) return;
         if (isTerminalRunStatus(state.status)) {
