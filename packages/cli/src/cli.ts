@@ -107,7 +107,12 @@ async function main(argv: string[]): Promise<number> {
           for (const workflow of await loadWorkflows(String(values.workflows))) runtime.registerWorkflow(workflow);
         }
         await runtime.cancel(runId, values.reason ? String(values.reason) : "Cancelled from continuum CLI");
-        console.log(`Cancellation requested for ${runId}`);
+        if (values.workflows) {
+          const state = await runtime.waitForRun(runId);
+          console.log(`Cancellation finished for ${runId} with status ${state.status}`);
+        } else {
+          console.log(`Cancellation requested for ${runId}`);
+        }
         return 0;
       }
 
