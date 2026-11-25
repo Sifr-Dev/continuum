@@ -188,6 +188,11 @@ export class WorkflowRuntime<Context = unknown> {
     this.recoveryTimers.set(runId, timer);
   }
 
+  private async deferLeaseRecovery(runId: string): Promise<void> {
+    const lease = (await this.journal.listRunLeases?.() ?? []).find((candidate) => candidate.runId === runId);
+    if (lease) this.scheduleLeaseRecovery(runId, lease.expiresAt - Date.now());
+  }
+
   async startDueScheduledWorkflows(now = Date.now()): Promise<string[]> {
     const started: string[] = [];
     const definitions = [...new Set(this.definitions.values())];
@@ -338,7 +343,10 @@ export class WorkflowRuntime<Context = unknown> {
     try {
       if (this.journal.acquireRunLease) {
         lease = await this.journal.acquireRunLease(runId, this.workerId, this.leaseTtlMs);
-        if (!lease) return;
+        if (!lease) {
+          await this.deferLeaseRecovery(runId);
+          return;
+        }
         this.activeLeases.set(runId, lease);
         if (this.journal.renewRunLease) {
           leaseHeartbeat = setInterval(() => {

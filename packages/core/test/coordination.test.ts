@@ -153,6 +153,23 @@ test("recovery adopts a deferred run when a dead worker lease expires", async ()
   assert.deepEqual(state.output, { work: "done" });
 });
 
+
+test("deferred recovery follows renewed leases until ownership expires", async () => {
+  const journal = new MemoryJournal();
+  const step = defineStep<{}, string>({ name: "work", execute: () => "done" });
+  const workflow = defineWorkflow<{}, [typeof step]>({ name: "renewed-lease-recovery", version: 1, steps: [step] });
+  const runtime = new WorkflowRuntime({ journal, context: {}, workerId: "replacement", random: () => 0.5 });
+  const runId = await runtime.startWorkflow(workflow, {}, { defer: true });
+  const lease = await journal.acquireRunLease(runId, "owner", 60);
+  assert.ok(lease);
+  assert.deepEqual(await runtime.recover(), []);
+  await sleep(20);
+  assert.equal(await journal.renewRunLease(lease, 160), true);
+
+  const state = await runtime.waitForRun(runId, 2_000);
+  assert.equal(state.status, "succeeded");
+});
+
 test("reattaching to a deferred child workflow starts its pump", async () => {
   const journal = new MemoryJournal();
   const childStep = defineStep<{ value: number }, number>({ name: "child-work", execute: ({ input }) => input.value });
