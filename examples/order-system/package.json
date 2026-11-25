@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/server.ts",
+    "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json"
   },
