@@ -53,6 +53,11 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   const method = request.method ?? "GET";
 
+  if (method === "POST" && !trustedMutation(request)) {
+    sendJson(response, 403, { error: "untrusted mutation request" });
+    return;
+  }
+
   if (method === "GET" && url.pathname === "/api/health") {
     sendJson(response, 200, { ok: true, framework: "continuum", recoveredAtStartup: recovered });
     return;
@@ -117,6 +122,18 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   }
 
   sendJson(response, 404, { error: "not found" });
+}
+
+function trustedMutation(request: IncomingMessage): boolean {
+  const contentType = request.headers["content-type"];
+  if (typeof contentType !== "string" || !contentType.toLowerCase().startsWith("application/json")) return false;
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === request.headers.host;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeOrder(body: Record<string, unknown>): OrderInput {
