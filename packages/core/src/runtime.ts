@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { resolveRetryPolicy, retryDecision } from "./backoff.js";
+import { resolveRetryPolicy, retryDecision, retryDelayMs } from "./backoff.js";
 import { RunAlreadyExistsError, RunCancelledError, StepInterruptedError, StepTimeoutError, serializeError } from "./errors.js";
 import { projectRun, summarizeRun } from "./projection.js";
 import type {
@@ -160,6 +160,31 @@ export class WorkflowRuntime<Context = unknown> {
     };
   }
 
+  /**
+   * Resolves the definition that may execute a run: exact version match first,
+   * then newer definitions that explicitly opt into migrating the run's version
+   * and still define every step the run may yet execute or compensate.
+   */
+  private resolveExecutableDefinition(state: RunState): { definition: AnyWorkflowDefinition; migrate: boolean } | undefined {
+    const exact = this.definitions.get(`${state.workflowName}@${state.version}`);
+    if (exact) return { definition: exact, migrate: false };
+    const terminal = new Set(["succeeded", "skipped", "compensated", "compensation_skipped"]);
+    const candidates = [...this.definitions.values()]
+      .filter(
+        (candidate) =>
+          candidate.name === state.workflowName &&
+          candidate.version > state.version &&
+          (candidate.migratesFrom ?? []).includes(state.version),
+      )
+      .sort((a, b) => b.version - a.version);
+    for (const candidate of candidates) {
+      const names = new Set(candidate.steps.map((step) => step.name));
+      const compatible = Object.values(state.steps).every((stepState) => terminal.has(stepState.status) || names.has(stepState.name));
+      if (compatible) return { definition: candidate, migrate: true };
+    }
+    return undefined;
+  }
+
   async recover(): Promise<string[]> {
     const recovered: string[] = [];
     const leases = new Map((await this.journal.listRunLeases?.() ?? []).map((lease) => [lease.runId, lease]));
@@ -167,8 +192,7 @@ export class WorkflowRuntime<Context = unknown> {
     for (const runId of await this.journal.runIds()) {
       const state = await this.getRun(runId);
       if (!state || isTerminalRunStatus(state.status)) continue;
-      const key = `${state.workflowName}@${state.version}`;
-      if (!this.definitions.has(key)) continue;
+      if (!this.resolveExecutableDefinition(state)) continue;
       const lease = leases.get(runId);
       if (lease && lease.expiresAt > wallNow) {
         this.scheduleLeaseRecovery(runId, lease.expiresAt - wallNow);
@@ -240,7 +264,7 @@ export class WorkflowRuntime<Context = unknown> {
       },
     ]);
     this.wake(runId);
-    if (this.definitions.has(`${state.workflowName}@${state.version}`)) {
+    if (this.resolveExecutableDefinition(state)) {
       this.pumpInBackground(runId);
     }
   }
@@ -270,7 +294,7 @@ export class WorkflowRuntime<Context = unknown> {
       }
     }
     this.wake(runId);
-    if (this.definitions.has(`${state.workflowName}@${state.version}`)) {
+    if (this.resolveExecutableDefinition(state)) {
       this.pumpInBackground(runId);
     }
   }
@@ -454,10 +478,22 @@ export class WorkflowRuntime<Context = unknown> {
           return;
         }
 
-        const definition = this.definitions.get(`${state.workflowName}@${state.version}`);
-        if (!definition) {
+        const resolved = this.resolveExecutableDefinition(state);
+        if (!resolved) {
           throw new Error(`Workflow definition "${state.workflowName}@${state.version}" is not registered`);
         }
+        if (resolved.migrate) {
+          await this.append([
+            {
+              runId,
+              workflowName: state.workflowName,
+              type: "run.migrated",
+              data: { fromVersion: state.version, toVersion: resolved.definition.version },
+            },
+          ]);
+          continue;
+        }
+        const definition = resolved.definition;
 
         const interrupted = await this.recordInterruptedSteps(runId, definition, state);
         if (interrupted) continue;
@@ -666,6 +702,7 @@ export class WorkflowRuntime<Context = unknown> {
     state: RunState,
     stepState: StepState,
   ): Promise<void> {
+    if (this.closing) return;
     const attempt = stepState.attempts + 1;
     const controller = new AbortController();
     const key = taskKey(runId, step.name);
@@ -770,6 +807,10 @@ export class WorkflowRuntime<Context = unknown> {
       }
     })();
 
+    if (this.closing) {
+      controller.abort(new RunCancelledError("runtime shutdown"));
+      return;
+    }
     this.activeTasks.set(key, { runId, stepName: step.name, kind: "step", promise, controller });
   }
 
@@ -858,9 +899,14 @@ export class WorkflowRuntime<Context = unknown> {
       if (this.activeTasks.has(taskKey(runId, stepState.name))) continue;
       const step = byName.get(stepState.name);
       const policy = resolveRetryPolicy(step?.retry);
+      // Crash interruptions are infrastructure, not application failure: they
+      // never consume the step's failure retry budget. A deploy must not be
+      // able to kill an otherwise healthy workflow. Backoff timing still uses
+      // the step's retry policy so recovered work does not stampede.
+      const delayMs = retryDelayMs(policy, stepState.attempts, this.random);
       const decision = state.cancellationRequested
         ? { retryable: false as const }
-        : retryDecision(policy, stepState.attempts, this.now(), this.random);
+        : { retryable: true as const, nextAttemptAt: this.now() + delayMs, delayMs };
       const error = serializeError(new StepInterruptedError(stepState.name, "worker crashed or was restarted"));
       events.push({
         runId,
