@@ -70,7 +70,7 @@ export class DemoServices {
   async fraudScreen(order: OrderInput): Promise<{ risk: "low" | "review"; score: number }> {
     await delay(80);
     const score = order.amount > 1_000 ? 71 : 18;
-    return { risk: score > 80 ? "review" : "low", score };
+    return { risk: score > 60 ? "review" : "low", score };
   }
 
   async reserveInventory(key: string, order: OrderInput): Promise<Reservation> {

@@ -24,6 +24,8 @@ export function projectRun(events: readonly ContinuumEvent[]): RunState | undefi
           ...(plan.idempotencyKey !== undefined ? { idempotencyKey: plan.idempotencyKey } : {}),
           hasCompensation: plan.hasCompensation,
           sideEffect: plan.sideEffect,
+          ...(plan.delayMs !== undefined ? { delayMs: plan.delayMs } : {}),
+          ...(plan.waitForSignal !== undefined ? { waitForSignal: plan.waitForSignal } : {}),
           ...(plan.description !== undefined ? { description: plan.description } : {}),
         };
       }
@@ -39,6 +41,7 @@ export function projectRun(events: readonly ContinuumEvent[]): RunState | undefi
         cancellationRequested: false,
         compensationStarted: false,
         steps,
+        signals: {},
         eventCount: 0,
       };
     }
@@ -57,6 +60,11 @@ export function projectRun(events: readonly ContinuumEvent[]): RunState | undefi
         state.cancellationRequested = true;
         state.cancellationReason = optionalString(event.data.reason);
         break;
+      case "run.signaled": {
+        const signalName = optionalString(event.data.signal);
+        if (signalName) state.signals[signalName] = event.data.payload;
+        break;
+      }
       case "step.started":
         mutateStep(state, event, (step) => {
           step.status = "running";
@@ -94,6 +102,7 @@ export function projectRun(events: readonly ContinuumEvent[]): RunState | undefi
       case "step.skipped":
         mutateStep(state, event, (step) => {
           step.status = "skipped";
+          step.completedAt = event.at;
           delete step.nextAttemptAt;
         });
         break;
@@ -220,6 +229,8 @@ function readStepPlans(value: unknown): StepPlan[] {
       ...(typeof item.idempotencyKey === "string" ? { idempotencyKey: item.idempotencyKey } : {}),
       hasCompensation: item.hasCompensation === true,
       sideEffect: item.sideEffect !== false,
+      ...(typeof item.delayMs === "number" && Number.isFinite(item.delayMs) ? { delayMs: item.delayMs } : {}),
+      ...(typeof item.waitForSignal === "string" ? { waitForSignal: item.waitForSignal } : {}),
       ...(typeof item.description === "string" ? { description: item.description } : {}),
     }];
   });

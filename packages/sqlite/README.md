@@ -10,6 +10,6 @@ const journal = new SqliteJournal("./continuum.db");
 const runtime = new WorkflowRuntime({ journal, context: services });
 ```
 
-Events are stored in a single append-only `continuum_events` table. Batched appends use transactions and payloads are validated as JSON by SQLite.
+Events are stored in an append-only `continuum_events` table. Batched appends use immediate transactions and payloads are validated as JSON by SQLite. `continuum_runs` enforces unique run IDs and `continuum_leases` implements the same lease/fencing contract as the PostgreSQL adapter.
 
-The adapter uses `better-sqlite3`, a mature embedded SQLite client. It is best suited to embedded deployments, demos, tests, and single-node services; high-concurrency multi-worker deployments should use a network database adapter with leases.
+The adapter uses `better-sqlite3`, a mature embedded SQLite client. It is best suited to embedded deployments, demos, edge nodes, tests, and single-node services. Horizontally scaled multi-worker deployments should use `@continuum/postgres`.

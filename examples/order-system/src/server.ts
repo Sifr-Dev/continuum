@@ -89,6 +89,16 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
     return;
   }
 
+  const signalMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/signal$/);
+  if (method === "POST" && signalMatch) {
+    const runId = decodeURIComponent(signalMatch[1] ?? "");
+    const body = await readJson(request);
+    if (typeof body.signal !== "string" || body.signal.length === 0) throw new Error("signal is required");
+    await runtime.signalRun(runId, body.signal, body.payload ?? null);
+    sendJson(response, 202, { ok: true });
+    return;
+  }
+
   if (method === "POST" && url.pathname === "/api/orders") {
     const body = await readJson(request);
     const order = normalizeOrder(body);

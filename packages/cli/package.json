@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@continuum/core": "0.1.0",
+    "@continuum/postgres": "0.1.0",
     "@continuum/sqlite": "0.1.0"
   },
   "devDependencies": {

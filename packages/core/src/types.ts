@@ -24,6 +24,14 @@ export interface ResolvedRetryPolicy {
   jitter: boolean;
 }
 
+export interface StartChildWorkflowOptions {
+  /** Deterministic child run id. Defaults to parent-run-id:parent-step-name. */
+  runId?: string;
+  metadata?: JsonObject;
+  /** Request child cancellation when the parent step is interrupted. Defaults to true. */
+  cancelWithParent?: boolean;
+}
+
 export interface StepExecutionArgs<Input, Outputs, Context> {
   input: Input;
   outputs: Readonly<Partial<Outputs>>;
@@ -33,8 +41,19 @@ export interface StepExecutionArgs<Input, Outputs, Context> {
   attempt: number;
   idempotencyKey?: string;
   signal: AbortSignal;
+  /** Latest durable payload for waitForSignal steps. */
+  signalPayload?: unknown;
   now: () => number;
   emit: (name: string, payload?: JsonObject) => Promise<void>;
+  /**
+   * Starts or reattaches to a deterministic child workflow and waits for its output.
+   * Retries after a worker crash reattach to the same child instead of duplicating it.
+   */
+  startChildWorkflow: <ChildInput, ChildOutput>(
+    definition: WorkflowDefinition<ChildInput, any, any>,
+    input: ChildInput,
+    options?: StartChildWorkflowOptions,
+  ) => Promise<ChildOutput>;
 }
 
 export interface CompensationArgs<Input, StepOutput, Outputs, Context> {
@@ -65,6 +84,12 @@ export interface StepDefinition<
   timeoutMs?: number;
   compensationTimeoutMs?: number;
   idempotencyKey?: string | ((input: Input) => string);
+  /** Durable delay after dependencies complete before the first attempt is eligible. */
+  delayMs?: number;
+  /** Durable external signal that must arrive before this step becomes eligible. */
+  waitForSignal?: string;
+  /** Pure conditional gate evaluated after ordering dependencies complete. */
+  when?: (args: { input: Input; outputs: Readonly<Partial<Outputs>> }) => boolean;
   /**
    * Set false for pure validation/computation. The dashboard uses this to
    * distinguish externally visible effects from derivation steps.
@@ -80,6 +105,15 @@ export type StepOutputs<Steps extends readonly AnyStepDefinition[]> = {
   [S in Steps[number] as S["name"]]: S extends StepDefinition<any, infer Output, any, any> ? Output : never;
 };
 
+export interface WorkflowSchedule<Input = unknown> {
+  /** Fixed production interval. Deterministic window run ids make distributed scheduling safe. */
+  intervalMs: number;
+  input: Input;
+  /** Number of missed preceding windows to backfill when a worker starts. Defaults to 0. */
+  catchupWindows?: number;
+  metadata?: JsonObject;
+}
+
 export interface WorkflowDefinition<
   Input = unknown,
   Outputs = Record<string, unknown>,
@@ -90,6 +124,7 @@ export interface WorkflowDefinition<
   description?: string;
   steps: readonly AnyStepDefinition[];
   validateInput?: (input: unknown) => Input;
+  schedule?: WorkflowSchedule<Input>;
   output?: (args: { input: Input; outputs: Readonly<Partial<Outputs>>; runId: string }) => unknown;
 }
 
@@ -131,6 +166,8 @@ export interface StepPlan {
   idempotencyKey?: string;
   hasCompensation: boolean;
   sideEffect: boolean;
+  delayMs?: number;
+  waitForSignal?: string;
   description?: string;
 }
 
@@ -138,6 +175,7 @@ export type ContinuumEventType =
   | "run.created"
   | "run.started"
   | "run.cancel_requested"
+  | "run.signaled"
   | "run.succeeded"
   | "run.failed"
   | "run.cancelled"
@@ -189,6 +227,8 @@ export interface StepState {
   durationMs?: number;
   hasCompensation: boolean;
   sideEffect: boolean;
+  delayMs?: number;
+  waitForSignal?: string;
   description?: string;
 }
 
@@ -209,6 +249,8 @@ export interface RunState {
   error?: SerializedError;
   output?: unknown;
   steps: Record<string, StepState>;
+  /** Latest payload received for each durable external signal. */
+  signals: Record<string, unknown>;
   eventCount: number;
 }
 
@@ -224,11 +266,31 @@ export interface RunSummary {
   error?: SerializedError;
 }
 
+export interface RunLease {
+  runId: string;
+  workerId: string;
+  fencingToken: number;
+  expiresAt: number;
+}
+
+export interface AppendEventOptions {
+  /** When present, the journal must atomically verify this fencing token while writing. */
+  lease?: RunLease;
+}
+
 export interface WorkflowJournal {
-  append(events: readonly NewContinuumEvent[]): Promise<ContinuumEvent[]>;
+  append(events: readonly NewContinuumEvent[], options?: AppendEventOptions): Promise<ContinuumEvent[]>;
   events(runId: string): Promise<ContinuumEvent[]>;
   allEvents(): Promise<ContinuumEvent[]>;
   runIds(): Promise<string[]>;
+  /** Atomically acquire or re-acquire a run worker lease. Implementations must be safe across processes. */
+  acquireRunLease?(runId: string, workerId: string, ttlMs: number): Promise<RunLease | undefined>;
+  /** Renew a still-owned lease; returns false when fencing no longer matches. */
+  renewRunLease?(lease: RunLease, ttlMs: number): Promise<boolean>;
+  /** Release a still-owned lease without changing workflow state. */
+  releaseRunLease?(lease: RunLease): Promise<void>;
+  /** Operational visibility into current lease ownership. */
+  listRunLeases?(): Promise<RunLease[]>;
   close?(): Promise<void> | void;
 }
 
@@ -251,6 +313,10 @@ export interface RuntimeOptions<Context = unknown> {
   now?: () => number;
   observers?: RuntimeObserver[];
   random?: () => number;
+  /** Stable worker identity used for distributed leases. Defaults to a random process identity. */
+  workerId?: string;
+  /** Lease duration in milliseconds for journals that support distributed workers. Defaults to 10s. */
+  leaseTtlMs?: number;
 }
 
 export interface WorkflowHandle<Output = unknown> {

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { writeFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { WorkflowRuntime, type AnyWorkflowDefinition } from "@continuum/core";
+import { WorkflowRuntime, type AnyWorkflowDefinition, type WorkflowJournal } from "@continuum/core";
+import { PostgresJournal } from "@continuum/postgres";
 import { SqliteJournal } from "@continuum/sqlite";
 import { formatRunSummary, formatStepTable, json, parseWorkflowSelector, table } from "./format.js";
 
@@ -14,8 +16,10 @@ Usage:
   continuum inspect <run-id> [--db file] [--events]
   continuum start <workflow[@version]> --workflows module.js --input '{"json":true}' [--db file] [--wait]
   continuum cancel <run-id> [--db file] [--workflows module.js] [--reason text]
+  continuum signal <run-id> <signal-name> [--payload '{"json":true}'] [--db file]
   continuum recover --workflows module.js [--db file]
-  continuum worker --workflows module.js [--db file]
+  continuum worker --workflows module.js [--db file] [--postgres url] [--lease-ttl ms] [--metrics-port port]
+  continuum leases [--db file] [--postgres url]
   continuum export [--db file] [--out file]
 
 Examples:
@@ -40,13 +44,21 @@ async function main(argv: string[]): Promise<number> {
       input: { type: "string" },
       out: { type: "string" },
       reason: { type: "string" },
+      postgres: { type: "string" },
+      payload: { type: "string" },
+      leaseTtl: { type: "string" },
+      metricsPort: { type: "string" },
       events: { type: "boolean", default: false },
       wait: { type: "boolean", default: false },
     },
   });
 
-  const journal = new SqliteJournal(resolve(String(values.db)));
-  const runtime = new WorkflowRuntime({ journal, context: {} });
+  const journal = createJournal(values.postgres ? String(values.postgres) : undefined, resolve(String(values.db)));
+  const runtime = new WorkflowRuntime({
+    journal,
+    context: {},
+    ...(values.leaseTtl ? { leaseTtlMs: Number(values.leaseTtl) } : {}),
+  });
 
   try {
     switch (command) {
@@ -100,6 +112,15 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
 
+      case "signal": {
+        const [runId, signalName] = positionals;
+        if (!runId || !signalName) throw new Error("signal requires a run id and signal name");
+        const payload = values.payload ? JSON.parse(String(values.payload)) : null;
+        await runtime.signalRun(runId, signalName, payload);
+        console.log(`Signal ${signalName} recorded for ${runId}`);
+        return 0;
+      }
+
       case "cancel": {
         const runId = positionals[0];
         if (!runId) throw new Error("cancel requires a run id");
@@ -129,18 +150,55 @@ async function main(argv: string[]): Promise<number> {
         const workflows = await loadWorkflows(required(values.workflows, "--workflows is required for worker"));
         for (const workflow of workflows) runtime.registerWorkflow(workflow);
         const initiallyRecovered = await runtime.recover();
-        console.log(`continuum worker online; recovered ${initiallyRecovered.length} run(s)`);
-        const interval = setInterval(() => {
-          void runtime.recover().then((runIds) => {
+        console.log(`continuum worker ${runtime.getWorkerId()} online; recovered ${initiallyRecovered.length} run(s)`);
+        const metricsServer = values.metricsPort
+          ? await startMetricsServer(runtime, journal, Number(values.metricsPort))
+          : undefined;
+        let tickRunning = false;
+        const tick = async () => {
+          if (tickRunning) return;
+          tickRunning = true;
+          try {
+            const scheduled = await runtime.startDueScheduledWorkflows();
+            if (scheduled.length > 0) console.log(`started ${scheduled.length} scheduled run(s): ${scheduled.join(", ")}`);
+            const runIds = await runtime.recover();
             if (runIds.length > 0) console.log(`adopted ${runIds.length} deferred run(s): ${runIds.join(", ")}`);
-          });
+          } catch (error) {
+            console.error(error instanceof Error ? error.message : String(error));
+          } finally {
+            tickRunning = false;
+          }
+        };
+        await tick();
+        const interval = setInterval(() => {
+          void tick();
         }, 1_000);
         await new Promise<void>((resolve) => {
           process.once("SIGINT", resolve);
           process.once("SIGTERM", resolve);
         });
         clearInterval(interval);
+        if (metricsServer) await new Promise<void>((resolveClose) => metricsServer.close(() => resolveClose()));
         console.log("continuum worker stopped");
+        return 0;
+      }
+
+      case "leases": {
+        if (!journal.listRunLeases) throw new Error("The selected journal does not expose worker leases");
+        const leases = (await journal.listRunLeases()).filter((lease) => lease.expiresAt > Date.now());
+        if (leases.length === 0) {
+          console.log("No active worker leases found.");
+          return 0;
+        }
+        console.log(table(
+          ["run", "worker", "fence", "expires"],
+          leases.map((lease) => [
+            lease.runId,
+            lease.workerId,
+            String(lease.fencingToken),
+            new Date(lease.expiresAt).toISOString(),
+          ]),
+        ));
         return 0;
       }
 
@@ -161,8 +219,61 @@ async function main(argv: string[]): Promise<number> {
         throw new Error(`Unknown command "${command}"\n\n${HELP}`);
     }
   } finally {
-    await journal.close();
+    await journal.close?.();
   }
+}
+
+async function startMetricsServer(runtime: WorkflowRuntime<unknown>, journal: WorkflowJournal, port: number): Promise<Server> {
+  const server = createServer((request, response) => {
+    void (async () => {
+      try {
+        if (request.url === "/health") {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(json({ ok: true, workerId: runtime.getWorkerId() }));
+          return;
+        }
+        if (request.url === "/runs") {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(json(await runtime.listRuns()));
+          return;
+        }
+        if (request.url === "/metrics") {
+          const runs = await runtime.listRuns();
+          const leases = journal.listRunLeases ? await journal.listRunLeases() : [];
+          const activeLeases = leases.filter((lease) => lease.expiresAt > Date.now());
+          const statuses = new Map<string, number>();
+          for (const run of runs) statuses.set(run.status, (statuses.get(run.status) ?? 0) + 1);
+          const lines = [
+            "# HELP continuum_workflow_runs Workflow runs by terminal or active status.",
+            "# TYPE continuum_workflow_runs gauge",
+            ...[...statuses.entries()].map(([status, count]) => `continuum_workflow_runs{status="${status}"} ${count}`),
+            "# HELP continuum_worker_active_leases Active distributed worker leases visible in the journal.",
+            "# TYPE continuum_worker_active_leases gauge",
+            `continuum_worker_active_leases ${activeLeases.length}`,
+            "# HELP continuum_worker_info Static worker identity information.",
+            "# TYPE continuum_worker_info gauge",
+            `continuum_worker_info{worker_id="${runtime.getWorkerId().replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"} 1`,
+          ];
+          response.writeHead(200, { "content-type": "text/plain; version=0.0.4" });
+          response.end(`${lines.join("\n")}\n`);
+          return;
+        }
+        response.writeHead(404, { "content-type": "text/plain" });
+        response.end("not found");
+      } catch (error) {
+        response.writeHead(500, { "content-type": "text/plain" });
+        response.end(error instanceof Error ? error.message : String(error));
+      }
+    })();
+  });
+  await new Promise<void>((resolveListen) => server.listen(port, "127.0.0.1", resolveListen));
+  console.log(`continuum worker metrics listening on http://127.0.0.1:${port}`);
+  return server;
+}
+
+function createJournal(postgresUrl: string | undefined, sqlitePath: string): WorkflowJournal {
+  if (postgresUrl) return new PostgresJournal(postgresUrl);
+  return new SqliteJournal(sqlitePath);
 }
 
 function required(value: unknown, message: string): string {

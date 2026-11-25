@@ -4,6 +4,7 @@ import { DemoServices, type OrderInput, type Payment, type Reservation, type Shi
 export interface CheckoutOutputs {
   validateOrder: { valid: true; itemCount: number };
   fraudScreen: { risk: "low" | "review"; score: number };
+  manualReview: { approved: true; reviewer: string };
   reserveInventory: Reservation;
   chargePayment: Payment;
   createShipment: Shipment;
@@ -36,10 +37,24 @@ export function createCheckoutWorkflow(services: DemoServices) {
     compensate: ({ idempotencyKey, output }) => services.releaseInventory(idempotencyKey ?? "", output),
   });
 
+  const manualReview = defineStep<OrderInput, CheckoutOutputs["manualReview"], CheckoutOutputs, DemoServices>({
+    name: "manualReview",
+    description: "Wait for a durable operator approval only when fraud risk requires review",
+    needs: ["fraudScreen"],
+    waitForSignal: "order.review",
+    sideEffect: false,
+    when: ({ outputs }) => outputs.fraudScreen?.risk === "review",
+    execute: ({ signalPayload }) => {
+      const review = signalPayload as { approved?: unknown; reviewer?: unknown } | undefined;
+      if (review?.approved !== true) throw new Error("manual review rejected the order");
+      return { approved: true, reviewer: typeof review.reviewer === "string" ? review.reviewer : "operations" };
+    },
+  });
+
   const chargePayment = defineStep<OrderInput, Payment, CheckoutOutputs, DemoServices>({
     name: "chargePayment",
     description: "Capture payment once, even when the gateway is flaky",
-    needs: ["fraudScreen", "reserveInventory"],
+    needs: ["manualReview", "reserveInventory"],
     retry: { attempts: 4, delayMs: 150, strategy: "exponential", maxDelayMs: 900 },
     timeoutMs: 1_000,
     execute: ({ input, idempotencyKey, signal }) => services.chargePayment(idempotencyKey ?? "", input, signal),
@@ -71,6 +86,7 @@ export function createCheckoutWorkflow(services: DemoServices) {
     [
       typeof validateOrder,
       typeof fraudScreen,
+      typeof manualReview,
       typeof reserveInventory,
       typeof chargePayment,
       typeof createShipment,
@@ -81,12 +97,13 @@ export function createCheckoutWorkflow(services: DemoServices) {
     name: "checkout",
     version: 1,
     description: "Resilient order checkout with idempotent effects and saga rollback",
-    steps: [validateOrder, fraudScreen, reserveInventory, chargePayment, createShipment, sendConfirmation],
+    steps: [validateOrder, fraudScreen, manualReview, reserveInventory, chargePayment, createShipment, sendConfirmation],
     validateInput: (input) => input as OrderInput,
     output: ({ input, outputs }) => ({
       orderId: input.orderId,
       reservation: outputs.reserveInventory,
       payment: outputs.chargePayment,
+      review: outputs.manualReview ?? null,
       shipment: outputs.createShipment,
       confirmation: outputs.sendConfirmation,
     }),
