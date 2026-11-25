@@ -31,7 +31,7 @@ await runtime.startWorkflow(checkoutWorkflow, input, {
 });
 ```
 
-A worker process adopts deferred or interrupted runs:
+Worker processes adopt deferred, scheduled, or interrupted runs:
 
 ```bash
 continuum worker \
@@ -39,7 +39,33 @@ continuum worker \
   --db ./data/continuum.db
 ```
 
-The current worker polls recovery and executes in one process. This deployment demonstrates the durable handoff model, but it does not yet provide multi-worker leases.
+For horizontally scaled workers, use PostgreSQL:
+
+```bash
+continuum worker \
+  --workflows ./dist/workflows.js \
+  --postgres postgres://postgres:continuum@localhost:5432/continuum \
+  --lease-ttl 10000 \
+  --metrics-port 9090
+```
+
+Each run has one lease owner at a time. Workers renew their leases continuously, expired leases are recoverable by another worker, and execution writes carry fencing tokens. A superseded/zombie worker cannot write an outcome after another worker takes ownership.
+
+The worker currently polls recovery approximately once per second, so worst-case adoption latency is lease TTL plus one polling interval.
+
+### Worker observability
+
+With `--metrics-port 9090`, the worker exposes localhost endpoints:
+
+- `GET /health` — worker identity and liveness
+- `GET /metrics` — Prometheus text metrics for statuses and active leases
+- `GET /runs` — JSON run summaries
+
+Use `continuum leases` to inspect active ownership and fencing tokens:
+
+```bash
+continuum leases --postgres "$DATABASE_URL"
+```
 
 ## Operator playbook
 
@@ -83,6 +109,22 @@ continuum cancel checkout:ord_123 \
 ```
 
 Cancellation is cooperative. Well-written steps should either finish quickly or abort when `signal` fires.
+
+### Send a durable signal
+
+Human approvals and asynchronous callbacks use `run.signaled` events:
+
+```bash
+continuum signal checkout:ord_123 order.review \
+  --postgres "$DATABASE_URL" \
+  --payload '{"approved":true,"reviewer":"ops@example.com"}'
+```
+
+A signal is durable before the workflow reacts to it. Re-sending the same signal replaces the latest projected payload for that signal name but preserves every event in the audit journal.
+
+### Scheduled workflows
+
+Workflows may declare fixed-interval schedules in code. Workers create deterministic window run IDs, so multiple workers can race safely and transactional uniqueness prevents duplicates. Use bounded `catchupWindows` when a deployment should backfill recent missed windows after downtime.
 
 ### Export an audit trail
 

@@ -11,6 +11,14 @@ export function validateWorkflow(definition: AnyWorkflowDefinition): string[] {
   if (!Array.isArray(definition.steps) || definition.steps.length === 0) {
     throw new WorkflowValidationError("Workflow must contain at least one step", { workflow: definition.name });
   }
+  if (definition.schedule) {
+    if (!Number.isFinite(definition.schedule.intervalMs) || definition.schedule.intervalMs < 1_000) {
+      throw new WorkflowValidationError("Workflow schedule intervalMs must be at least 1000", { workflow: definition.name });
+    }
+    if (definition.schedule.catchupWindows !== undefined && (!Number.isInteger(definition.schedule.catchupWindows) || definition.schedule.catchupWindows < 0)) {
+      throw new WorkflowValidationError("Workflow schedule catchupWindows must be a non-negative integer", { workflow: definition.name });
+    }
+  }
 
   const seen = new Set<string>();
   const graph = new Map<string, readonly string[]>();
@@ -29,6 +37,18 @@ export function validateWorkflow(definition: AnyWorkflowDefinition): string[] {
     }
     if (typeof step.execute !== "function") {
       throw new WorkflowValidationError(`Step "${step.name}" does not define an execute function`, {
+        workflow: definition.name,
+        step: step.name,
+      });
+    }
+    if (step.delayMs !== undefined && (!Number.isFinite(step.delayMs) || step.delayMs < 0)) {
+      throw new WorkflowValidationError(`Step "${step.name}" delayMs must be a non-negative finite number`, {
+        workflow: definition.name,
+        step: step.name,
+      });
+    }
+    if (step.waitForSignal !== undefined && step.waitForSignal.length === 0) {
+      throw new WorkflowValidationError(`Step "${step.name}" waitForSignal must be a non-empty string`, {
         workflow: definition.name,
         step: step.name,
       });

@@ -6,9 +6,11 @@ Core durable execution primitives for Continuum.
 
 - `defineStep` — declare one typed workflow step
 - `defineWorkflow` — declare a versioned DAG of steps
-- `WorkflowRuntime` — schedule, execute, cancel, recover, and inspect runs
+- `defineTimerStep` — declare a durable delay step
+- `defineSignalStep` — declare a durable signal wait step
+- `WorkflowRuntime` — schedule, execute, signal, cancel, recover, inspect, and schedule runs
 - `MemoryJournal` — ephemeral journal for tests
-- projection, validation, retry, and error helpers
+- projection, validation, retry, lease, and error helpers
 
 ## Minimal example
 
@@ -33,4 +35,12 @@ const handle = await runtime.runWorkflow(workflow, { amount: 4200 });
 console.log(await handle.result);
 ```
 
-Use `@continuum/sqlite` for durable storage outside tests.
+## Coordination primitives
+
+- `delayMs` waits durably without consuming worker capacity
+- `waitForSignal` waits for `runtime.signalRun`
+- `when` conditionally skips branches
+- `startChildWorkflow` starts or reattaches to deterministic child runs
+- `schedule` creates duplicate-safe fixed-interval runs across distributed workers
+
+Use `@continuum/sqlite` for embedded durable storage or `@continuum/postgres` for distributed workers.

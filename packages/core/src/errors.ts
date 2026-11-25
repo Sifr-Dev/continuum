@@ -18,6 +18,12 @@ export class WorkflowValidationError extends ContinuumError {
   }
 }
 
+export class RunAlreadyExistsError extends ContinuumError {
+  constructor(runId: string) {
+    super(`Run "${runId}" already exists`, "RUN_ALREADY_EXISTS", { runId });
+  }
+}
+
 export class StepTimeoutError extends ContinuumError {
   constructor(stepName: string, timeoutMs: number) {
     super(`Step "${stepName}" timed out after ${timeoutMs}ms`, "STEP_TIMEOUT", { stepName, timeoutMs });
@@ -33,6 +39,12 @@ export class StepInterruptedError extends ContinuumError {
 export class RunCancelledError extends ContinuumError {
   constructor(runId: string) {
     super(`Run "${runId}" was cancelled`, "RUN_CANCELLED", { runId });
+  }
+}
+
+export class WorkerLeaseLostError extends ContinuumError {
+  constructor(runId: string) {
+    super(`Worker lease for run "${runId}" was lost`, "WORKER_LEASE_LOST", { runId });
   }
 }
 

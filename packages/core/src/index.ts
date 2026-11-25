@@ -6,15 +6,18 @@ export { topologicalOrder, validateWorkflow } from "./validation.js";
 export {
   CompensationError,
   ContinuumError,
+  RunAlreadyExistsError,
   RunCancelledError,
   StepInterruptedError,
   StepTimeoutError,
+  WorkerLeaseLostError,
   WorkflowValidationError,
   serializeError,
 } from "./errors.js";
 export type {
   AnyStepDefinition,
   AnyWorkflowDefinition,
+  AppendEventOptions,
   CompensationArgs,
   ContinuumEvent,
   ContinuumEventType,
@@ -23,12 +26,14 @@ export type {
   NewContinuumEvent,
   ResolvedRetryPolicy,
   RetryPolicy,
+  RunLease,
   RunState,
   RunStatus,
   RunSummary,
   RuntimeObserver,
   RuntimeOptions,
   SerializedError,
+  StartChildWorkflowOptions,
   StartRunOptions,
   StepDefinition,
   StepExecutionArgs,
@@ -38,6 +43,7 @@ export type {
   WorkflowDefinition,
   WorkflowHandle,
   WorkflowJournal,
+  WorkflowSchedule,
 } from "./types.js";
 
 import type { AnyStepDefinition, StepDefinition, StepOutputs, WorkflowDefinition } from "./types.js";
@@ -46,6 +52,36 @@ export function defineStep<Input, StepOutput, Outputs = Record<string, unknown>,
   definition: StepDefinition<Input, StepOutput, Outputs, Context>,
 ): StepDefinition<Input, StepOutput, Outputs, Context> {
   return definition;
+}
+
+export function defineTimerStep<Outputs = Record<string, unknown>, Context = unknown>(
+  name: string,
+  durationMs: number,
+  needs: readonly string[] = [],
+): StepDefinition<unknown, { waitedMs: number }, Outputs, Context> {
+  return defineStep({
+    name,
+    needs,
+    delayMs: durationMs,
+    sideEffect: false,
+    description: `Durable timer for ${durationMs}ms`,
+    execute: () => ({ waitedMs: durationMs }),
+  });
+}
+
+export function defineSignalStep<Payload = unknown, Outputs = Record<string, unknown>, Context = unknown>(
+  name: string,
+  signalName: string,
+  needs: readonly string[] = [],
+): StepDefinition<unknown, Payload, Outputs, Context> {
+  return defineStep({
+    name,
+    needs,
+    waitForSignal: signalName,
+    sideEffect: false,
+    description: `Waits for durable signal "${signalName}"`,
+    execute: ({ signalPayload }) => signalPayload as Payload,
+  });
 }
 
 export function defineWorkflow<

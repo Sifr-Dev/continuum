@@ -67,6 +67,7 @@
           <button data-scenario="flaky-payment">Flaky payment</button>
           <button data-scenario="payment-outage">Rollback saga</button>
           <button data-scenario="slow-payment">Timeout retry</button>
+          <button data-review-order>Manual review</button>
         </div>
       </section>
 
@@ -92,7 +93,11 @@
               <h2 id="selected-title">Select a run</h2>
               <p id="selected-subtitle">Workflow execution graph appears here.</p>
             </div>
-            <button id="cancel-run" class="danger hidden">Cancel run</button>
+            <div class="run-actions">
+              <button id="approve-review" class="primary hidden">Approve review</button>
+              <button id="reject-review" class="danger hidden">Reject</button>
+              <button id="cancel-run" class="danger hidden">Cancel run</button>
+            </div>
           </div>
           <div class="legend">
             <span><i class="pending"></i>pending</span>

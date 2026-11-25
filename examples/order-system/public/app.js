@@ -7,18 +7,20 @@ const state = {
 };
 
 const nodes = {
-  validateOrder: { x: 55, y: 155, label: "Validate order" },
-  fraudScreen: { x: 235, y: 62, label: "Fraud screen" },
-  reserveInventory: { x: 235, y: 245, label: "Reserve inventory" },
-  chargePayment: { x: 430, y: 155, label: "Charge payment" },
-  createShipment: { x: 625, y: 155, label: "Create shipment" },
-  sendConfirmation: { x: 790, y: 155, label: "Send confirmation" },
+  validateOrder: { x: 45, y: 155, label: "Validate order" },
+  fraudScreen: { x: 220, y: 55, label: "Fraud screen" },
+  reserveInventory: { x: 220, y: 255, label: "Reserve inventory" },
+  manualReview: { x: 390, y: 55, label: "Manual review" },
+  chargePayment: { x: 540, y: 155, label: "Charge payment" },
+  createShipment: { x: 720, y: 105, label: "Create shipment" },
+  sendConfirmation: { x: 720, y: 265, label: "Send confirmation" },
 };
 
 const edges = [
   ["validateOrder", "fraudScreen"],
   ["validateOrder", "reserveInventory"],
-  ["fraudScreen", "chargePayment"],
+  ["fraudScreen", "manualReview"],
+  ["manualReview", "chargePayment"],
   ["reserveInventory", "chargePayment"],
   ["chargePayment", "createShipment"],
   ["createShipment", "sendConfirmation"],
@@ -32,6 +34,8 @@ const dag = document.querySelector("#dag");
 const selectedTitle = document.querySelector("#selected-title");
 const selectedSubtitle = document.querySelector("#selected-subtitle");
 const cancelButton = document.querySelector("#cancel-run");
+const approveButton = document.querySelector("#approve-review");
+const rejectButton = document.querySelector("#reject-review");
 const health = document.querySelector("#health");
 
 document.querySelector("#order-form").addEventListener("submit", async (event) => {
@@ -57,6 +61,12 @@ document.querySelectorAll("[data-scenario]").forEach((button) => {
   });
 });
 
+document.querySelector("[data-review-order]").addEventListener("click", () => {
+  document.querySelector("[name=chaos]").value = "none";
+  document.querySelector("[name=amount]").value = "1499";
+  document.querySelector("#order-form").requestSubmit();
+});
+
 document.querySelector("#refresh").addEventListener("click", () => refresh(true));
 cancelButton.addEventListener("click", async () => {
   if (!state.selectedRunId) return;
@@ -66,6 +76,22 @@ cancelButton.addEventListener("click", async () => {
   });
   await refresh(true);
 });
+
+approveButton.addEventListener("click", () => sendReviewDecision(true));
+rejectButton.addEventListener("click", () => sendReviewDecision(false));
+
+async function sendReviewDecision(approved) {
+  const waiting = waitingSignalStep(state.selectedRun);
+  if (!state.selectedRunId || !waiting) return;
+  await api(`/api/runs/${encodeURIComponent(state.selectedRunId)}/signal`, {
+    method: "POST",
+    body: JSON.stringify({
+      signal: waiting.waitForSignal,
+      payload: { approved, reviewer: "operations-console" },
+    }),
+  });
+  await refresh(true);
+}
 
 async function refresh(forceSelectLatest = false) {
   try {
@@ -160,13 +186,22 @@ function renderSelected() {
     selectedTitle.textContent = "Select a run";
     selectedSubtitle.textContent = "Workflow execution graph appears here.";
     cancelButton.classList.add("hidden");
+    approveButton.classList.add("hidden");
+    rejectButton.classList.add("hidden");
     return;
   }
 
   selectedTitle.textContent = `${run.workflowName}@${run.version} · ${run.status}`;
   selectedSubtitle.textContent = `${run.runId} · ${run.eventCount} durable events`;
   const cancellable = run.status === "running" || run.status === "compensating";
+  const waiting = waitingSignalStep(run);
   cancelButton.classList.toggle("hidden", !cancellable);
+  approveButton.classList.toggle("hidden", !waiting || run.status !== "running");
+  rejectButton.classList.toggle("hidden", !waiting || run.status !== "running");
+}
+
+function waitingSignalStep(run) {
+  return Object.values(run?.steps ?? {}).find((step) => step.status === "pending" && typeof step.waitForSignal === "string");
 }
 
 function renderDag() {

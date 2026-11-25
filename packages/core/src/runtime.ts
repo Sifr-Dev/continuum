@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolveRetryPolicy, retryDecision } from "./backoff.js";
-import { RunCancelledError, StepInterruptedError, StepTimeoutError, serializeError } from "./errors.js";
+import { RunAlreadyExistsError, RunCancelledError, StepInterruptedError, StepTimeoutError, serializeError } from "./errors.js";
 import { projectRun, summarizeRun } from "./projection.js";
 import type {
   AnyStepDefinition,
@@ -8,10 +8,12 @@ import type {
   ContinuumEvent,
   JsonObject,
   NewContinuumEvent,
+  RunLease,
   RunState,
   RunSummary,
   RuntimeObserver,
   RuntimeOptions,
+  StartChildWorkflowOptions,
   StartRunOptions,
   StepState,
   WorkflowHandle,
@@ -43,10 +45,13 @@ export class WorkflowRuntime<Context = unknown> {
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly observers: RuntimeObserver[];
+  private readonly workerId: string;
+  private readonly leaseTtlMs: number;
   private readonly definitions = new Map<string, AnyWorkflowDefinition>();
   private readonly orderedSteps = new Map<string, string[]>();
   private readonly reverseOrderedSteps = new Map<string, string[]>();
   private readonly activeTasks = new Map<string, ActiveTask>();
+  private readonly activeLeases = new Map<string, RunLease>();
   private readonly pumping = new Set<string>();
   private readonly wakeResolvers = new Map<string, Set<() => void>>();
   private readonly finishedRuns = new Set<string>();
@@ -58,6 +63,12 @@ export class WorkflowRuntime<Context = unknown> {
     this.now = options.now ?? Date.now;
     this.random = options.random ?? Math.random;
     this.observers = options.observers ?? [];
+    this.workerId = options.workerId ?? `worker-${randomUUID()}`;
+    this.leaseTtlMs = Math.max(250, options.leaseTtlMs ?? 10_000);
+  }
+
+  getWorkerId(): string {
+    return this.workerId;
   }
 
   registerWorkflow<Workflow extends AnyWorkflowDefinition>(definition: Workflow): Workflow {
@@ -78,7 +89,7 @@ export class WorkflowRuntime<Context = unknown> {
     const runId = options.runId ?? randomUUID();
     const existing = await this.journal.events(runId);
     if (existing.length > 0) {
-      throw new Error(`Run "${runId}" already exists`);
+      throw new RunAlreadyExistsError(runId);
     }
 
     const validatedInput = definition.validateInput ? definition.validateInput(input) : input;
@@ -96,6 +107,8 @@ export class WorkflowRuntime<Context = unknown> {
         idempotencyKey,
         hasCompensation: typeof step.compensate === "function",
         sideEffect: step.sideEffect !== false,
+        ...(step.delayMs !== undefined ? { delayMs: step.delayMs } : {}),
+        ...(step.waitForSignal ? { waitForSignal: step.waitForSignal } : {}),
         ...(step.description ? { description: step.description } : {}),
       };
     });
@@ -146,7 +159,11 @@ export class WorkflowRuntime<Context = unknown> {
 
   async recover(): Promise<string[]> {
     const recovered: string[] = [];
+    const leases = new Map((await this.journal.listRunLeases?.() ?? []).map((lease) => [lease.runId, lease]));
+    const wallNow = Date.now();
     for (const runId of await this.journal.runIds()) {
+      const lease = leases.get(runId);
+      if (lease && lease.expiresAt > wallNow && lease.workerId !== this.workerId) continue;
       const state = await this.getRun(runId);
       if (!state || isTerminalRunStatus(state.status)) continue;
       const key = `${state.workflowName}@${state.version}`;
@@ -155,6 +172,60 @@ export class WorkflowRuntime<Context = unknown> {
       this.pumpInBackground(runId);
     }
     return recovered;
+  }
+
+  async startDueScheduledWorkflows(now = Date.now()): Promise<string[]> {
+    const started: string[] = [];
+    const definitions = [...new Set(this.definitions.values())];
+    for (const definition of definitions) {
+      const schedule = definition.schedule;
+      if (!schedule) continue;
+      const currentWindow = Math.floor(now / schedule.intervalMs) * schedule.intervalMs;
+      const catchupWindows = schedule.catchupWindows ?? 0;
+      for (let offset = catchupWindows; offset >= 0; offset -= 1) {
+        const windowStart = currentWindow - offset * schedule.intervalMs;
+        if (windowStart < 0) continue;
+        const runId = `scheduled:${definition.name}:${definition.version}:${windowStart}`;
+        try {
+          await this.startWorkflow(definition, schedule.input, {
+            runId,
+            metadata: {
+              ...(schedule.metadata ?? {}),
+              continuumScheduled: true,
+              scheduleWindow: windowStart,
+            },
+          });
+          started.push(runId);
+        } catch (error) {
+          if (!isDuplicateRunError(error, runId)) throw error;
+        }
+      }
+    }
+    return started;
+  }
+
+  async signalRun(runId: string, signalName: string, payload: unknown = null): Promise<void> {
+    if (!signalName) throw new Error("Signal name must not be empty");
+    const state = await this.getRun(runId);
+    if (!state) throw new Error(`Run "${runId}" does not exist`);
+    if (isTerminalRunStatus(state.status)) return;
+    assertJsonCompatible(payload, `payload for signal "${signalName}"`);
+    await this.append([
+      {
+        runId,
+        workflowName: state.workflowName,
+        type: "run.signaled",
+        data: { signal: signalName, payload: payload as JsonObject[string] },
+      },
+    ]);
+    this.wake(runId);
+    if (this.definitions.has(`${state.workflowName}@${state.version}`)) {
+      this.pumpInBackground(runId);
+    }
+  }
+
+  async signalWorkflow(runId: string, signalName: string, payload: unknown = null): Promise<void> {
+    await this.signalRun(runId, signalName, payload);
   }
 
   async cancel(runId: string, reason = "Cancelled by operator"): Promise<void> {
@@ -219,7 +290,8 @@ export class WorkflowRuntime<Context = unknown> {
   }
 
   private async append(events: readonly NewContinuumEvent[]): Promise<ContinuumEvent[]> {
-    const rows = await this.journal.append(events);
+    const lease = events.length > 0 ? this.activeLeases.get(events[0]?.runId ?? "") : undefined;
+    const rows = await this.journal.append(events, lease ? { lease } : undefined);
     for (const event of rows) {
       for (const observer of this.observers) {
         try {
@@ -233,30 +305,46 @@ export class WorkflowRuntime<Context = unknown> {
   }
 
   private pumpInBackground(runId: string): void {
-    void this.pump(runId).catch(async (error) => {
-      try {
-        const state = await this.getRun(runId);
-        if (!state || isTerminalRunStatus(state.status)) return;
-        await this.append([
-          {
-            runId,
-            workflowName: state.workflowName,
-            type: "run.failed",
-            data: { error: serializeError(error) },
-          },
-        ]);
-      } catch {
-        // If the journal itself is unavailable there is nowhere safe to report the failure.
-      }
+    void this.pump(runId).catch(() => {
+      // Pump failures are usually journal/lease failures. Do not write a terminal
+      // failure outside lease ownership: the durable journal remains recoverable
+      // by the next authoritative worker.
     });
   }
 
   private async pump(runId: string): Promise<void> {
     if (this.pumping.has(runId)) return;
     this.pumping.add(runId);
+    let lease: RunLease | undefined;
+    let leaseLost = false;
+    let leaseHeartbeat: NodeJS.Timeout | undefined;
 
     try {
+      if (this.journal.acquireRunLease) {
+        lease = await this.journal.acquireRunLease(runId, this.workerId, this.leaseTtlMs);
+        if (!lease) return;
+        this.activeLeases.set(runId, lease);
+        if (this.journal.renewRunLease) {
+          leaseHeartbeat = setInterval(() => {
+            if (!lease || leaseLost) return;
+            void this.journal.renewRunLease?.(lease, this.leaseTtlMs).then((renewed) => {
+              if (!renewed) {
+                leaseLost = true;
+                this.abortRunTasks(runId, new StepInterruptedError(runId, "worker lease was lost"));
+                this.wake(runId);
+              }
+            }).catch(() => {
+              leaseLost = true;
+              this.abortRunTasks(runId, new StepInterruptedError(runId, "worker lease renewal failed"));
+              this.wake(runId);
+            });
+          }, Math.max(100, Math.floor(this.leaseTtlMs / 3)));
+          leaseHeartbeat.unref?.();
+        }
+      }
+
       for (;;) {
+        if (leaseLost) return;
         const state = await this.getRun(runId);
         if (!state) return;
         if (isTerminalRunStatus(state.status)) {
@@ -301,7 +389,44 @@ export class WorkflowRuntime<Context = unknown> {
           if (!stepState || !stepDefinition) continue;
           if (stepState.status !== "pending") continue;
           if ((stepState.nextAttemptAt ?? 0) > now) continue;
-          if (!stepState.needs.every((dependency) => state.steps[dependency]?.status === "succeeded")) continue;
+          if (!stepState.needs.every((dependency) => ["succeeded", "skipped"].includes(state.steps[dependency]?.status ?? ""))) continue;
+          if (waitingForSignal(stepDefinition, state)) continue;
+          if (stepReadyAt(stepDefinition, state, stepState) > now) continue;
+
+          if (stepDefinition.when) {
+            let condition = false;
+            try {
+              condition = stepDefinition.when({ input: state.input, outputs: outputsFromState(state) });
+            } catch (error) {
+              await this.append([
+                {
+                  runId,
+                  workflowName: definition.name,
+                  type: "step.failed",
+                  data: {
+                    step: stepName,
+                    attempt: 0,
+                    error: serializeError(error),
+                    retryable: false,
+                  },
+                },
+              ]);
+              startedAny = true;
+              continue;
+            }
+            if (!condition) {
+              await this.append([
+                {
+                  runId,
+                  workflowName: definition.name,
+                  type: "step.skipped",
+                  data: { step: stepName, reason: "condition false", conditional: true },
+                },
+              ]);
+              startedAny = true;
+              continue;
+            }
+          }
 
           await this.startStepTask(runId, definition, stepDefinition, state, stepState);
           capacity -= 1;
@@ -319,17 +444,27 @@ export class WorkflowRuntime<Context = unknown> {
           continue;
         }
 
-        const nextAttemptAt = Object.values(state.steps)
-          .filter((step) => step.status === "pending" && step.nextAttemptAt !== undefined)
-          .map((step) => step.nextAttemptAt as number)
+        const nextScheduledAt = Object.values(state.steps)
+          .flatMap((stepState) => {
+            if (stepState.status !== "pending") return [];
+            const stepDefinition = byName.get(stepState.name);
+            const times: number[] = [];
+            if (stepState.nextAttemptAt !== undefined) times.push(stepState.nextAttemptAt);
+            if (stepDefinition) {
+              const readyAt = stepReadyAt(stepDefinition, state, stepState);
+              if (readyAt > now) times.push(readyAt);
+            }
+            return times;
+          })
+          .filter((time) => time > this.now())
           .sort((a, b) => a - b)[0];
 
-        if (nextAttemptAt !== undefined && nextAttemptAt > this.now()) {
-          await this.waitForWake(runId, Math.min(1_000, nextAttemptAt - this.now()));
+        if (nextScheduledAt !== undefined) {
+          await this.waitForWake(runId, Math.min(1_000, nextScheduledAt - this.now()));
           continue;
         }
 
-        if (Object.values(state.steps).every((step) => step.status === "succeeded")) {
+        if (Object.values(state.steps).every((step) => ["succeeded", "skipped"].includes(step.status))) {
           const outputs = outputsFromState(state);
           let output: unknown;
           try {
@@ -377,6 +512,15 @@ export class WorkflowRuntime<Context = unknown> {
 
         const unfinished = Object.values(state.steps).filter((step) => step.status === "pending");
         const retryScheduled = unfinished.some((step) => step.nextAttemptAt !== undefined);
+        const externallyWaiting = unfinished.some((stepState) => {
+          const stepDefinition = byName.get(stepState.name);
+          if (!stepDefinition) return false;
+          return waitingForSignal(stepDefinition, state) || stepReadyAt(stepDefinition, state, stepState) > this.now();
+        });
+        if (unfinished.length > 0 && externallyWaiting) {
+          await this.waitForWake(runId, 1_000);
+          continue;
+        }
         if (unfinished.length > 0 && !retryScheduled) {
           // This should be impossible for validated DAGs once active work and retries
           // have been accounted for, so fail closed rather than spinning forever.
@@ -399,6 +543,15 @@ export class WorkflowRuntime<Context = unknown> {
         await this.waitForWake(runId, 50);
       }
     } finally {
+      if (leaseHeartbeat) clearInterval(leaseHeartbeat);
+      if (lease && this.journal.releaseRunLease) {
+        try {
+          await this.journal.releaseRunLease(lease);
+        } catch {
+          // Lease expiry is the correctness backstop if release fails.
+        }
+      }
+      this.activeLeases.delete(runId);
       this.pumping.delete(runId);
     }
   }
@@ -443,7 +596,16 @@ export class WorkflowRuntime<Context = unknown> {
             attempt,
             ...(stepState.idempotencyKey !== undefined ? { idempotencyKey: stepState.idempotencyKey } : {}),
             signal: controller.signal,
+            ...(step.waitForSignal ? { signalPayload: state.signals[step.waitForSignal] } : {}),
             now: this.now,
+            startChildWorkflow: (childDefinition, childInput, childOptions) => this.runChildWorkflow(
+              runId,
+              step.name,
+              controller,
+              childDefinition,
+              childInput,
+              childOptions,
+            ),
             emit: async (name, payload = {}) => {
               await this.append([
                 {
@@ -477,22 +639,27 @@ export class WorkflowRuntime<Context = unknown> {
         const decision = cancelled
           ? { retryable: false as const }
           : retryDecision(policy, attempt, this.now(), this.random);
-        await this.append([
-          {
-            runId,
-            workflowName: workflow.name,
-            type: cancelled ? "step.interrupted" : "step.failed",
-            data: {
-              step: step.name,
-              attempt,
-              error: serialized,
-              retryable: decision.retryable,
-              ...(decision.nextAttemptAt !== undefined ? { nextAttemptAt: decision.nextAttemptAt } : {}),
-              ...(decision.delayMs !== undefined ? { retryDelayMs: decision.delayMs } : {}),
-              durationMs: this.now() - startedAt,
+        try {
+          await this.append([
+            {
+              runId,
+              workflowName: workflow.name,
+              type: cancelled ? "step.interrupted" : "step.failed",
+              data: {
+                step: step.name,
+                attempt,
+                error: serialized,
+                retryable: decision.retryable,
+                ...(decision.nextAttemptAt !== undefined ? { nextAttemptAt: decision.nextAttemptAt } : {}),
+                ...(decision.delayMs !== undefined ? { retryDelayMs: decision.delayMs } : {}),
+                durationMs: this.now() - startedAt,
+              },
             },
-          },
-        ]);
+          ]);
+        } catch {
+          // If the outcome cannot be journaled (including lease fencing), the
+          // surviving step.started record lets the next owner recover safely.
+        }
       } finally {
         this.activeTasks.delete(key);
         this.wake(runId);
@@ -500,6 +667,50 @@ export class WorkflowRuntime<Context = unknown> {
     })();
 
     this.activeTasks.set(key, { runId, stepName: step.name, kind: "step", promise, controller });
+  }
+
+  private async runChildWorkflow<ChildInput, ChildOutput>(
+    parentRunId: string,
+    parentStepName: string,
+    controller: AbortController,
+    definition: AnyWorkflowDefinition,
+    input: ChildInput,
+    options: StartChildWorkflowOptions = {},
+  ): Promise<ChildOutput> {
+    const childRunId = options.runId ?? `${parentRunId}:${parentStepName}`;
+    try {
+      await this.startWorkflow(definition, input, {
+        runId: childRunId,
+        ...(options.metadata ? { metadata: options.metadata } : {}),
+      });
+    } catch (error) {
+      if (!(error instanceof RunAlreadyExistsError && error.details?.runId === childRunId)) throw error;
+    }
+
+    const propagateCancellation = options.cancelWithParent !== false;
+    const onAbort = () => {
+      if (propagateCancellation) {
+        void this.cancel(childRunId, `parent step "${parentStepName}" was interrupted`).catch(() => undefined);
+      }
+    };
+    controller.signal.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      for (;;) {
+        if (controller.signal.aborted) throw controller.signal.reason;
+        const state = await this.getRun(childRunId);
+        if (!state) throw new Error(`Child workflow run "${childRunId}" does not exist`);
+        if (isTerminalRunStatus(state.status)) {
+          if (state.status === "succeeded") return state.output as ChildOutput;
+          const error = new Error(state.error?.message ?? `Child workflow finished with status ${state.status}`);
+          error.name = state.error?.name ?? "ChildWorkflowError";
+          throw error;
+        }
+        await sleep(25);
+      }
+    } finally {
+      controller.signal.removeEventListener("abort", onAbort);
+    }
   }
 
   private async executeWithTimeout(args: {
@@ -823,6 +1034,12 @@ export class WorkflowRuntime<Context = unknown> {
     return [...this.activeTasks.values()].filter((task) => task.runId === runId);
   }
 
+  private abortRunTasks(runId: string, reason: unknown): void {
+    for (const task of this.activeTasksForRun(runId)) {
+      task.controller.abort(reason);
+    }
+  }
+
   private waitForWake(runId: string, timeoutMs: number): Promise<void> {
     return new Promise((resolve) => {
       const resolvers = this.wakeResolvers.get(runId) ?? new Set<() => void>();
@@ -854,6 +1071,21 @@ export class WorkflowRuntime<Context = unknown> {
       }
     }
   }
+}
+
+function waitingForSignal(step: AnyStepDefinition, state: RunState): boolean {
+  return step.waitForSignal !== undefined && state.signals[step.waitForSignal] === undefined;
+}
+
+function stepReadyAt(step: AnyStepDefinition, state: RunState, stepState: StepState): number {
+  const base = stepState.needs.length === 0
+    ? state.createdAt
+    : Math.max(...stepState.needs.map((dependency) => state.steps[dependency]?.completedAt ?? state.createdAt));
+  return base + Math.max(0, step.delayMs ?? 0);
+}
+
+function isDuplicateRunError(error: unknown, runId: string): boolean {
+  return error instanceof RunAlreadyExistsError && error.details?.runId === runId;
 }
 
 function outputsFromState(state: RunState): Record<string, unknown> {
