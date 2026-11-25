@@ -58,7 +58,7 @@ The worker currently polls recovery approximately once per second, so worst-case
 With `--metrics-port 9090`, the worker exposes localhost endpoints:
 
 - `GET /health` — worker identity and liveness
-- `GET /metrics` — Prometheus text metrics for statuses and active leases
+- `GET /metrics` — Prometheus text metrics: run counts by status, active leases, worker identity, plus per-step execution counters (`continuum_step_executions_total` by workflow/step/outcome), step duration histograms (`continuum_step_duration_ms`), and terminal run counters (`continuum_runs_completed_total`) accumulated by the worker's built-in `ContinuumMetrics` observer. Alert on `outcome="failed"` rates, interrupted-step spikes (deploys or crashes), and p99 duration regressions per step.
 - `GET /runs` — JSON run summaries
 
 Use `continuum leases` to inspect active ownership and fencing tokens:

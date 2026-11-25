@@ -76,6 +76,11 @@ export class WorkflowRuntime<Context = unknown> {
     return this.workerId;
   }
 
+  /** Registers an additional observer. Observer failures stay isolated from workflow correctness. */
+  addObserver(observer: RuntimeObserver): void {
+    this.observers.push(observer);
+  }
+
   registerWorkflow<Workflow extends AnyWorkflowDefinition>(definition: Workflow): Workflow {
     const ordered = validateWorkflow(definition);
     const key = workflowKey(definition);
