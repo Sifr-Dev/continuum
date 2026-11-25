@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { WorkflowRuntime, type AnyWorkflowDefinition, type WorkflowJournal } from "@continuum/core";
+import { ContinuumMetrics, WorkflowRuntime, type AnyWorkflowDefinition, type WorkflowJournal } from "@continuum/core";
 import { PostgresJournal } from "@continuum/postgres";
 import { SqliteJournal } from "@continuum/sqlite";
 import { formatRunSummary, formatStepTable, json, parseWorkflowSelector, table } from "./format.js";
@@ -169,10 +169,12 @@ async function main(argv: string[]): Promise<number> {
       case "worker": {
         const workflows = await loadWorkflows(required(values.workflows, "--workflows is required for worker"));
         for (const workflow of workflows) runtime.registerWorkflow(workflow);
+        const executionMetrics = new ContinuumMetrics();
+        runtime.addObserver(executionMetrics);
         const initiallyRecovered = await runtime.recover();
         console.log(`continuum worker ${runtime.getWorkerId()} online; recovered ${initiallyRecovered.length} run(s)`);
         const metricsServer = metricsPort
-          ? await startMetricsServer(runtime, journal, Number(metricsPort))
+          ? await startMetricsServer(runtime, journal, Number(metricsPort), executionMetrics)
           : undefined;
         let tickRunning = false;
         const tick = async () => {
@@ -247,7 +249,7 @@ async function main(argv: string[]): Promise<number> {
   }
 }
 
-async function startMetricsServer(runtime: WorkflowRuntime<unknown>, journal: WorkflowJournal, port: number): Promise<Server> {
+async function startMetricsServer(runtime: WorkflowRuntime<unknown>, journal: WorkflowJournal, port: number, executionMetrics?: ContinuumMetrics): Promise<Server> {
   const server = createServer((request, response) => {
     void (async () => {
       try {
@@ -279,7 +281,7 @@ async function startMetricsServer(runtime: WorkflowRuntime<unknown>, journal: Wo
             `continuum_worker_info{worker_id="${runtime.getWorkerId().replaceAll("\\", "\\\\").replaceAll("\"", "\\\"")}"} 1`,
           ];
           response.writeHead(200, { "content-type": "text/plain; version=0.0.4" });
-          response.end(`${lines.join("\n")}\n`);
+          response.end(`${executionMetrics ? executionMetrics.textFormat() : ""}${lines.join("\n")}\n`);
           return;
         }
         response.writeHead(404, { "content-type": "text/plain" });

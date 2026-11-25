@@ -1,4 +1,5 @@
 export { MemoryJournal } from "./memory-journal.js";
+export { ContinuumMetrics } from "./metrics.js";
 export { WorkflowRuntime } from "./runtime.js";
 export { projectRun, projectSummaries, summarizeRun } from "./projection.js";
 export { retryDecision, retryDelayMs, resolveRetryPolicy } from "./backoff.js";
