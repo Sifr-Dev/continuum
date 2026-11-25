@@ -339,13 +339,26 @@ export class WorkflowRuntime<Context = unknown> {
             assertJsonCompatible(output, "workflow output");
           } catch (error) {
             const serialized = serializeError(error);
+            const hasCompensableEffect = definition.steps.some((step) =>
+              step.sideEffect !== false && state.steps[step.name]?.status === "succeeded"
+            );
             await this.append([
-              {
-                runId,
-                workflowName: state.workflowName,
-                type: "compensation.started",
-                data: { reason: `workflow output failed: ${serialized.message}` },
-              },
+              hasCompensableEffect
+                ? {
+                    runId,
+                    workflowName: state.workflowName,
+                    type: "compensation.started",
+                    data: {
+                      reason: `workflow output failed: ${serialized.message}`,
+                      error: serialized as unknown as JsonObject,
+                    },
+                  }
+                : {
+                    runId,
+                    workflowName: state.workflowName,
+                    type: "run.failed",
+                    data: { error: serialized as unknown as JsonObject },
+                  },
             ]);
             continue;
           }
@@ -758,7 +771,7 @@ export class WorkflowRuntime<Context = unknown> {
       return;
     }
 
-    const originalFailure = Object.values(state.steps).find((step) => step.status === "failed")?.error;
+    const originalFailure = Object.values(state.steps).find((step) => step.status === "failed")?.error ?? state.error;
     await this.append([
       {
         runId,

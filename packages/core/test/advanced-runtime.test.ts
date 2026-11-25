@@ -189,7 +189,29 @@ test("workflow output failure rolls back completed side effects", async () => {
   const state = await instance.waitForRun(runId);
 
   assert.equal(state.status, "compensated");
+  assert.equal(state.error?.message, "cannot shape output");
   assert.equal(compensated, 1);
+});
+
+test("pure workflow output failure reports failed rather than compensated", async () => {
+  const pure = defineStep<{}, string>({ name: "pure", sideEffect: false, execute: () => "done" });
+  const workflow = defineWorkflow<{}, [typeof pure]>({
+    name: "pure-output-failure",
+    version: 1,
+    steps: [pure],
+    output: () => {
+      throw new Error("cannot shape pure output");
+    },
+  });
+
+  const instance = runtime();
+  const handle = await instance.runWorkflow(workflow, {});
+  const rejection = assert.rejects(handle.result, /cannot shape pure output/);
+  const state = await instance.waitForRun(handle.runId);
+  await rejection;
+
+  assert.equal(state.status, "failed");
+  assert.equal(state.error?.message, "cannot shape pure output");
 });
 
 test("concurrent duplicate caller-assigned run ids only create one run", async () => {
