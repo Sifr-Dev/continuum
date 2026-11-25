@@ -1,4 +1,4 @@
-import type { JsonObject, SerializedError } from "./types.js";
+import type { JsonObject, JsonValue, SerializedError } from "./types.js";
 
 export class ContinuumError extends Error {
   readonly code: string;
@@ -54,7 +54,7 @@ export function serializeError(error: unknown): SerializedError {
       message: error.message,
       ...(error.stack ? { stack: error.stack } : {}),
       ...(typeof maybeCode === "string" ? { code: maybeCode } : {}),
-      ...(isJsonObject(maybeDetails) ? { details: maybeDetails } : {}),
+      ...(isJsonObject(maybeDetails) ? { details: sanitizeJsonObject(maybeDetails) } : {}),
     };
   }
 
@@ -80,6 +80,34 @@ export function serializeError(error: unknown): SerializedError {
 
 function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sanitizeJsonObject(value: JsonObject): JsonObject {
+  return sanitizeJsonValue(value) as JsonObject;
+}
+
+function sanitizeJsonValue(value: unknown, seen = new Set<object>()): JsonValue {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : String(value);
+  if (typeof value === "bigint" || typeof value === "symbol" || typeof value === "function" || value === undefined) {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    const sanitized = value.map((item) => sanitizeJsonValue(item, seen));
+    seen.delete(value);
+    return sanitized;
+  }
+  if (typeof value === "object" && value !== null) {
+    if (seen.has(value)) return "[Circular]";
+    seen.add(value);
+    const sanitized: JsonObject = {};
+    for (const [key, item] of Object.entries(value)) sanitized[key] = sanitizeJsonValue(item, seen);
+    seen.delete(value);
+    return sanitized;
+  }
+  return String(value);
 }
 
 function safeJson(value: unknown): string {
