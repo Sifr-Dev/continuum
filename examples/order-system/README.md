@@ -33,7 +33,7 @@ Open <http://localhost:4173>.
 
 ## Exposure and operator authentication
 
-The demo binds to localhost by default. Setting `HOST` to a non-loopback interface is refused unless `CONTINUUM_OPERATOR_TOKEN` is also set. When a token is configured, every `/api` endpoint requires `Authorization: Bearer <token>`; the browser console prompts for the token and stores it in local storage.
+The demo binds to localhost over HTTP by default. Direct non-loopback exposure is refused unless all of these are configured: `CONTINUUM_OPERATOR_TOKEN`, `CONTINUUM_TLS_KEY_FILE`, and `CONTINUUM_TLS_CERT_FILE`. When a token is configured, every `/api` endpoint requires `Authorization: Bearer <token>`; the browser console prompts for the token and stores it in local storage. For production-like use, prefer a TLS-terminating reverse proxy in front of the loopback listener.
 
 ## Data
 
