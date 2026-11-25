@@ -146,6 +146,12 @@ Symptoms:
 
 Expected behavior: retry eventually succeeds or exhausts policy.
 
+### Deploys and graceful shutdown
+
+`runtime.close({ graceMs })` is a bounded drain: in-flight steps get `graceMs` (default 5s) to finish and journal their outcomes, then remaining work is aborted, run leases are released — so replacement workers adopt immediately instead of waiting out the lease TTL — and the journal closes. Steps that ignore cancellation are abandoned after a bounded window; fencing turns their late writes into rejected no-ops, so a stuck step cannot hang a deploy or corrupt the journal. A closing runtime rejects new runs.
+
+The CLI worker wires this to process signals: `SIGTERM`/`SIGINT` starts the drain, tunable with `--shutdown-grace ms`. Set the orchestrator's termination grace (e.g. Kubernetes `terminationGracePeriodSeconds`) above `--shutdown-grace` plus a few seconds of slack.
+
 ### Worker crash
 
 Symptoms before recovery:

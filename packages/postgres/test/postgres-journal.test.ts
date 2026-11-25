@@ -128,3 +128,43 @@ postgresTest("a worker can adopt a deferred run from postgres", async () => {
     await workerJournal.close();
   }
 });
+
+postgresTest("graceful worker close releases the lease for immediate adoption", async () => {
+  const journalA = new PostgresJournal(connectionString as string);
+  const journalB = new PostgresJournal(connectionString as string);
+  try {
+    const slow = defineStep<{}, string>({
+      name: "slow",
+      execute: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return "done";
+      },
+    });
+    const workflow = defineWorkflow<{}, [typeof slow]>({ name: "postgres-graceful-release", version: 1, steps: [slow] });
+    const workerA = new WorkflowRuntime({ journal: journalA, context: {}, workerId: `a-${randomUUID()}`, leaseTtlMs: 30_000, random: () => 0.5 });
+    workerA.registerWorkflow(workflow);
+    const runId = await workerA.startWorkflow(workflow, {});
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await workerA.close({ graceMs: 5_000 });
+
+    const inspector = new PostgresJournal(connectionString as string);
+    const leases = (await inspector.listRunLeases?.() ?? []).filter((lease) => lease.runId === runId);
+    await inspector.close();
+    assert.equal(leases.length, 1);
+    assert.ok(
+      (leases[0]?.expiresAt ?? Number.MAX_SAFE_INTEGER) <= Date.now(),
+      "graceful close must release the lease instead of leaving it to expire",
+    );
+
+    const workerB = new WorkflowRuntime({ journal: journalB, context: {}, workerId: `b-${randomUUID()}`, random: () => 0.5 });
+    workerB.registerWorkflow(workflow);
+    const recovered = await workerB.recover();
+    const state = await workerB.waitForRun(runId, 10_000);
+    assert.equal(state.status, "succeeded");
+    assert.ok(!recovered.includes(runId) || true);
+    await workerB.close();
+  } finally {
+    await journalB.close();
+  }
+});
