@@ -42,7 +42,7 @@ export function createCheckoutWorkflow(services: DemoServices) {
     needs: ["fraudScreen", "reserveInventory"],
     retry: { attempts: 4, delayMs: 150, strategy: "exponential", maxDelayMs: 900 },
     timeoutMs: 1_000,
-    execute: ({ input, idempotencyKey }) => services.chargePayment(idempotencyKey ?? "", input),
+    execute: ({ input, idempotencyKey, signal }) => services.chargePayment(idempotencyKey ?? "", input, signal),
     compensate: ({ idempotencyKey, output }) => services.refundPayment(idempotencyKey ?? "", output),
   });
 
