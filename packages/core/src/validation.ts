@@ -20,6 +20,23 @@ export function validateWorkflow(definition: AnyWorkflowDefinition): string[] {
     }
   }
 
+  if (definition.migratesFrom !== undefined) {
+    if (!Array.isArray(definition.migratesFrom)) {
+      throw new WorkflowValidationError("migratesFrom must be an array of version numbers", { workflow: definition.name });
+    }
+    for (const version of definition.migratesFrom) {
+      if (!Number.isInteger(version) || version < 1 || version >= definition.version) {
+        throw new WorkflowValidationError(
+          `migratesFrom entries must be positive integers lower than the definition version ${definition.version}`,
+          { workflow: definition.name },
+        );
+      }
+    }
+    if (new Set(definition.migratesFrom).size !== definition.migratesFrom.length) {
+      throw new WorkflowValidationError("migratesFrom must not contain duplicate versions", { workflow: definition.name });
+    }
+  }
+
   if (definition.queries !== undefined) {
     for (const [queryName, handler] of Object.entries(definition.queries)) {
       if (!queryName) {

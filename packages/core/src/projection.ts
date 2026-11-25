@@ -56,6 +56,9 @@ export function projectRun(events: readonly ContinuumEvent[]): RunState | undefi
       case "run.started":
         state.startedAt = event.at;
         break;
+      case "run.migrated":
+        state.version = asNumber(event.data.toVersion, state.version);
+        break;
       case "run.cancel_requested":
         state.cancellationRequested = true;
         state.cancellationReason = optionalString(event.data.reason);

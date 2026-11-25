@@ -143,6 +143,15 @@ export interface WorkflowDefinition<
   output?: (args: { input: Input; outputs: Readonly<Partial<Outputs>>; runId: string }) => unknown;
   /** Named pure read-only queries over projected run state. */
   queries?: Record<string, WorkflowQuery<Input, Outputs>>;
+  /**
+   * Earlier versions of this workflow whose in-flight runs this definition may
+   * adopt. Migration is explicit and conservative: a run is only migrated when
+   * every step that may still execute or compensate exists under the same name
+   * in this definition. The journaled step plan is never retrofitted — migrated
+   * runs finish their original graph with the new code, and the migration is
+   * recorded in the journal as `run.migrated`.
+   */
+  migratesFrom?: number[];
 }
 
 export type AnyWorkflowDefinition = WorkflowDefinition<any, any, any>;
@@ -193,6 +202,7 @@ export type ContinuumEventType =
   | "run.started"
   | "run.cancel_requested"
   | "run.signaled"
+  | "run.migrated"
   | "run.succeeded"
   | "run.failed"
   | "run.cancelled"

@@ -1,0 +1,16 @@
+import { MemoryJournal, WorkflowRuntime, defineStep, defineWorkflow } from "./src/index.js";
+const journal = new MemoryJournal();
+const chargeV1 = defineStep<{}, string>({ name: "charge", execute: () => new Promise(() => {}) });
+const shipV1 = defineStep<{}, string>({ name: "ship", needs: ["charge"], execute: () => "shipped" });
+const workflowV1 = defineWorkflow<{}, [typeof chargeV1, typeof shipV1]>({ name: "incompat", version: 1, steps: [chargeV1, shipV1] });
+const writer = new WorkflowRuntime({ journal, context: {}, random: () => 0.5 });
+writer.registerWorkflow(workflowV1);
+await writer.startWorkflow(workflowV1, {});
+await writer.close({ graceMs: 0 });
+const chargeV2 = defineStep<{}, string>({ name: "charge", execute: () => "charged" });
+const workflowV2 = defineWorkflow<{}, [typeof chargeV2]>({ name: "incompat", version: 2, steps: [chargeV2], migratesFrom: [1] });
+const worker = new WorkflowRuntime({ journal, context: {}, random: () => 0.5 });
+worker.registerWorkflow(workflowV2);
+await worker.recover();
+await worker.close();
+console.log("done");

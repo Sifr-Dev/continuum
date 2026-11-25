@@ -201,7 +201,7 @@ AND no outcome event exists
 AND no live task in this runtime owns the step
 ```
 
-Recovery appends `step.interrupted` and makes a retry decision. If attempts remain, the step returns to `pending` with a persisted `nextAttemptAt`; otherwise it becomes terminally failed.
+Recovery appends `step.interrupted` and reschedules the step with backoff derived from its retry policy. Interruptions are infrastructure, not application failure: they never consume the step's failure retry budget, so a deploy or crash cannot kill an otherwise healthy workflow. Operator cancellation is the exception — interrupted work under a cancellation request does not retry.
 
 This is intentionally conservative. The external effect may or may not have happened before the crash. Stable idempotency keys are therefore part of the framework contract.
 
@@ -266,9 +266,9 @@ The journal itself is the audit log. Observers can consume every appended event 
 
 ## Versioning model
 
-Workflow identity is `name@version`. Recovery requires the exact version to be registered. This prevents a worker from accidentally resuming a run with a different graph shape.
+Workflow identity is `name@version`. Because the step plan is journaled at `run.created`, replay never depends on the shape of the code that happens to be deployed — unlike rehydration-based systems, deploying a graph change cannot corrupt an in-flight run's history.
 
-Automatic migration of in-flight runs is future work because adding, renaming, reordering, or changing conditional logic alters the meaning of replayed events.
+In-flight migration is explicit and conservative. A definition may declare `migratesFrom: [<earlier versions>]`. A worker may then adopt an in-flight run of one of those versions when every step that can still execute or compensate exists under the same name in the new definition — steps already terminal in the journal may legitimately be absent, which is what makes removing a completed step a legal migration. The adoption is recorded in the journal as `run.migrated` with the from/to versions, and the run finishes its original journaled graph using the new code. Migration never retrofits new steps into an in-flight run: the plan is fixed at creation, which keeps the meaning of every journaled event stable. Without the opt-in, exact-version matching applies and migration is refused.
 
 ## Worker lifecycle
 
