@@ -83,7 +83,11 @@ function isJsonObject(value: unknown): value is JsonObject {
 }
 
 function sanitizeJsonObject(value: JsonObject): JsonObject {
-  return sanitizeJsonValue(value) as JsonObject;
+  try {
+    return sanitizeJsonValue(value) as JsonObject;
+  } catch {
+    return { value: "[Unserializable error details]" };
+  }
 }
 
 function sanitizeJsonValue(value: unknown, seen = new Set<object>()): JsonValue {

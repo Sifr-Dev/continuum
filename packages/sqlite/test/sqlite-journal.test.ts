@@ -88,6 +88,44 @@ test("serializes circular output error details without blocking rollback", async
   await journal.close();
 });
 
+test("throwing error detail getters do not block rollback", async () => {
+  const journal = SqliteJournal.memory();
+  let compensated = 0;
+  const effect = defineStep<{}, string>({
+    name: "effect",
+    execute: () => "done",
+    compensate: () => {
+      compensated += 1;
+    },
+  });
+  const workflow = defineWorkflow<{}, [typeof effect]>({
+    name: "sqlite-output-getter-error",
+    version: 1,
+    steps: [effect],
+    output: () => {
+      const details = {} as Record<string, unknown>;
+      Object.defineProperty(details, "exploding", {
+        enumerable: true,
+        get() {
+          throw new Error("getter failed");
+        },
+      });
+      const error = new Error("output getter failed") as Error & { details: Record<string, unknown> };
+      error.details = details;
+      throw error;
+    },
+  });
+  const runtime = new WorkflowRuntime({ journal, context: {} });
+
+  const runId = await runtime.startWorkflow(workflow, {});
+  const state = await runtime.waitForRun(runId);
+
+  assert.equal(state.status, "compensated");
+  assert.equal(compensated, 1);
+  assert.equal(state.error?.details?.value, "[Unserializable error details]");
+  await journal.close();
+});
+
 test("recovers an interrupted run from a reopened SQLite journal", async () => {
   const directory = mkdtempSync(join(tmpdir(), "continuum-sqlite-"));
   const filename = join(directory, "events.db");
