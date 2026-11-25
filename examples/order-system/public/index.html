@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Continuum Operations Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="background-grid"></div>
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark">∞</div>
+        <div>
+          <h1>Continuum</h1>
+          <p>Durable execution operations console</p>
+        </div>
+      </div>
+      <div class="health" id="health"><span class="dot"></span>connecting</div>
+    </header>
+
+    <main class="shell">
+      <section class="control-panel glass">
+        <div class="panel-heading">
+          <div>
+            <h2>Order workflow</h2>
+            <p>Run checkout through an idempotent, compensating DAG.</p>
+          </div>
+        </div>
+
+        <form id="order-form" class="order-form">
+          <label>
+            Customer
+            <input name="customerId" value="customer@example.com" autocomplete="off" />
+          </label>
+          <label>
+            SKU
+            <select name="sku">
+              <option value="sku-keyboard">Mechanical keyboard</option>
+              <option value="sku-mouse">Precision mouse</option>
+              <option value="sku-monitor">Studio monitor</option>
+            </select>
+          </label>
+          <label>
+            Quantity
+            <input name="quantity" type="number" min="1" value="1" />
+          </label>
+          <label>
+            Amount
+            <input name="amount" type="number" min="1" step="0.01" value="249" />
+          </label>
+          <label class="wide">
+            Failure injection
+            <select name="chaos">
+              <option value="none">None — happy path</option>
+              <option value="flaky-payment">Flaky payment gateway — retries recover</option>
+              <option value="payment-outage">Payment outage — saga rollback</option>
+              <option value="inventory-outage">Inventory outage — retries then failure</option>
+              <option value="slow-payment">Slow payment — timeout then idempotent retry</option>
+            </select>
+          </label>
+          <button class="primary" type="submit">Start workflow</button>
+        </form>
+
+        <div class="scenario-row">
+          <button data-scenario="none">Happy path</button>
+          <button data-scenario="flaky-payment">Flaky payment</button>
+          <button data-scenario="payment-outage">Rollback saga</button>
+          <button data-scenario="slow-payment">Timeout retry</button>
+        </div>
+      </section>
+
+      <section class="metrics" id="metrics">
+        <article class="metric glass"><span>Total runs</span><strong id="metric-total">0</strong></article>
+        <article class="metric glass"><span>Succeeded</span><strong id="metric-succeeded">0</strong></article>
+        <article class="metric glass"><span>Compensated</span><strong id="metric-compensated">0</strong></article>
+        <article class="metric glass"><span>Events</span><strong id="metric-events">0</strong></article>
+      </section>
+
+      <section class="workspace">
+        <aside class="runs glass">
+          <div class="section-title">
+            <h2>Runs</h2>
+            <button id="refresh" title="Refresh">↻</button>
+          </div>
+          <div id="run-list" class="run-list empty">No workflow runs yet</div>
+        </aside>
+
+        <section class="dag-panel glass">
+          <div class="section-title run-heading">
+            <div>
+              <h2 id="selected-title">Select a run</h2>
+              <p id="selected-subtitle">Workflow execution graph appears here.</p>
+            </div>
+            <button id="cancel-run" class="danger hidden">Cancel run</button>
+          </div>
+          <div class="legend">
+            <span><i class="pending"></i>pending</span>
+            <span><i class="running"></i>running</span>
+            <span><i class="succeeded"></i>succeeded</span>
+            <span><i class="failed"></i>failed</span>
+            <span><i class="compensated"></i>compensated</span>
+          </div>
+          <svg id="dag" viewBox="0 0 960 390" role="img" aria-label="Workflow graph"></svg>
+        </section>
+
+        <aside class="timeline glass">
+          <div class="section-title"><h2>Event journal</h2></div>
+          <div id="event-list" class="event-list empty">Durable events appear here</div>
+        </aside>
+      </section>
+
+      <section class="bottom-grid">
+        <article class="glass inventory">
+          <div class="section-title"><h2>Inventory</h2></div>
+          <div id="inventory"></div>
+        </article>
+        <article class="glass effects">
+          <div class="section-title"><h2>External effect log</h2></div>
+          <div id="effect-log" class="effect-log empty">No side effects yet</div>
+        </article>
+      </section>
+    </main>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
