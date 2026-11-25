@@ -305,8 +305,8 @@ export class WorkflowRuntime<Context = unknown> {
     await this.journal.close?.();
   }
 
-  private async append(events: readonly NewContinuumEvent[]): Promise<ContinuumEvent[]> {
-    const lease = events.length > 0 ? this.activeLeases.get(events[0]?.runId ?? "") : undefined;
+  private async append(events: readonly NewContinuumEvent[], leaseOverride?: RunLease): Promise<ContinuumEvent[]> {
+    const lease = leaseOverride ?? (events.length > 0 ? this.activeLeases.get(events[0]?.runId ?? "") : undefined);
     const rows = await this.journal.append(events, lease ? { lease } : undefined);
     for (const event of rows) {
       for (const observer of this.observers) {
@@ -584,6 +584,7 @@ export class WorkflowRuntime<Context = unknown> {
     const controller = new AbortController();
     const key = taskKey(runId, step.name);
     const startedAt = this.now();
+    const taskLease = this.activeLeases.get(runId);
 
     await this.append([
       {
@@ -596,7 +597,7 @@ export class WorkflowRuntime<Context = unknown> {
           ...(stepState.idempotencyKey !== undefined ? { idempotencyKey: stepState.idempotencyKey } : {}),
         },
       },
-    ]);
+    ], taskLease);
 
     const promise = (async () => {
       try {
@@ -631,7 +632,7 @@ export class WorkflowRuntime<Context = unknown> {
                   type: "custom",
                   data: { name, payload, step: step.name },
                 },
-              ]);
+              ], taskLease);
             },
           }),
         });
@@ -648,7 +649,7 @@ export class WorkflowRuntime<Context = unknown> {
               durationMs: this.now() - startedAt,
             },
           },
-        ]);
+        ], taskLease);
       } catch (error) {
         const serialized = serializeError(error);
         const cancelled = controller.signal.aborted && controller.signal.reason instanceof RunCancelledError;
@@ -672,7 +673,7 @@ export class WorkflowRuntime<Context = unknown> {
                 durationMs: this.now() - startedAt,
               },
             },
-          ]);
+          ], taskLease);
         } catch {
           // If the outcome cannot be journaled (including lease fencing), the
           // surviving step.started record lets the next owner recover safely.

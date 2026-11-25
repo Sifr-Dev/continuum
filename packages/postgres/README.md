@@ -10,7 +10,6 @@ const journal = new PostgresJournal(process.env.DATABASE_URL!);
 const runtime = new WorkflowRuntime({
   journal,
   context: services,
-  workerId: process.env.HOSTNAME,
   leaseTtlMs: 10_000,
 });
 
