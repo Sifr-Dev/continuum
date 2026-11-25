@@ -107,6 +107,18 @@ export function createCheckoutWorkflow(services: DemoServices) {
       shipment: outputs.createShipment,
       confirmation: outputs.sendConfirmation,
     }),
+    queries: {
+      orderStatus: ({ input, outputs, status, steps }) => ({
+        orderId: input.orderId,
+        runStatus: status,
+        paid: outputs.chargePayment !== undefined,
+        shipped: outputs.createShipment !== undefined,
+        awaitingReview: steps.manualReview?.status === "pending",
+        completedSteps: Object.values(steps).filter((step) => step.status === "succeeded").length,
+        totalSteps: Object.keys(steps).length,
+      }),
+      paymentSummary: ({ outputs }) => outputs.chargePayment ?? null,
+    },
   });
 }
 

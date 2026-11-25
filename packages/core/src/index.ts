@@ -17,6 +17,7 @@ export {
 export type {
   AnyStepDefinition,
   AnyWorkflowDefinition,
+  WorkflowQuery,
   AppendEventOptions,
   CompensationArgs,
   ContinuumEvent,
