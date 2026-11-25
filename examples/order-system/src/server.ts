@@ -12,6 +12,7 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const publicDir = resolve(__dirname, "../public");
 const dataDir = resolve(process.env.CONTINUUM_DATA_DIR ?? join(process.cwd(), ".continuum"));
 const port = Number(process.env.PORT ?? 4173);
+const host = process.env.HOST ?? "127.0.0.1";
 
 await mkdir(dataDir, { recursive: true });
 const journal = new SqliteJournal(join(dataDir, "continuum.db"));
@@ -19,6 +20,7 @@ const services = new DemoServices();
 const checkoutWorkflow = createCheckoutWorkflow(services);
 const runtime = new WorkflowRuntime({ journal, context: services, concurrency: 4 });
 runtime.registerWorkflow(checkoutWorkflow);
+services.restoreFromEvents(await journal.allEvents());
 const recovered = await runtime.recover();
 if (recovered.length > 0) {
   console.log(`Recovered ${recovered.length} interrupted workflow run(s): ${recovered.join(", ")}`);
@@ -34,8 +36,8 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(port, () => {
-  console.log(`Continuum order-system demo listening on http://localhost:${port}`);
+server.listen(port, host, () => {
+  console.log(`Continuum order-system demo listening on http://${host}:${port}`);
 });
 
 process.on("SIGINT", shutdown);
@@ -137,7 +139,15 @@ function isChaosMode(value: unknown): value is OrderInput["chaos"] {
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(Buffer.from(chunk));
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > 64 * 1024) {
+      request.destroy();
+      throw new Error("request body exceeds 64 KiB");
+    }
+    chunks.push(Buffer.from(chunk));
+  }
   if (chunks.length === 0) return {};
   const text = Buffer.concat(chunks).toString("utf8");
   if (!text.trim()) return {};
