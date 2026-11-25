@@ -100,6 +100,7 @@ export function projectRun(events: readonly ContinuumEvent[]): RunState | undefi
       case "compensation.started":
         state.compensationStarted = true;
         state.compensationReason = optionalString(event.data.reason);
+        if (event.data.error !== undefined) state.error = readError(event.data.error);
         state.status = "compensating";
         break;
       case "compensation.step_started":
@@ -156,6 +157,7 @@ export function projectRun(events: readonly ContinuumEvent[]): RunState | undefi
         break;
       case "run.compensated":
         state.status = "compensated";
+        if (event.data.error !== undefined) state.error = readError(event.data.error);
         state.completedAt = event.at;
         break;
       case "run.compensation_failed":
