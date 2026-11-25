@@ -9,9 +9,9 @@
     "examples/order-system"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
+    "build": "npm run build --workspace @continuum/core && npm run build --workspace @continuum/sqlite && npm run build --workspace @continuum/cli && npm run build --workspace @continuum/order-system-demo",
     "test": "npm run test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "typecheck": "npm run build --workspace @continuum/core && npm run build --workspace @continuum/sqlite && npm run typecheck --workspaces --if-present",
     "demo": "npm run dev --workspace @continuum/order-system-demo"
   },
   "devDependencies": {
