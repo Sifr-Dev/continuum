@@ -60,7 +60,7 @@ export class MemoryJournal implements WorkflowJournal {
   async acquireRunLease(runId: string, workerId: string, ttlMs: number): Promise<RunLease | undefined> {
     const now = Date.now();
     const existing = this.leases.get(runId);
-    if (existing && existing.expiresAt > now && existing.workerId !== workerId) return undefined;
+    if (existing && existing.expiresAt > now) return undefined;
     const lease: RunLease = {
       runId,
       workerId,
@@ -82,6 +82,7 @@ export class MemoryJournal implements WorkflowJournal {
     const existing = this.leases.get(lease.runId);
     if (existing?.workerId === lease.workerId && existing.fencingToken === lease.fencingToken) {
       existing.expiresAt = 0;
+      existing.fencingToken += 1;
     }
   }
 

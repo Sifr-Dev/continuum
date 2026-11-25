@@ -148,7 +148,6 @@ export class PostgresJournal implements WorkflowJournal {
            fencing_token = continuum_leases.fencing_token + 1,
            expires_at = EXCLUDED.expires_at
        WHERE continuum_leases.expires_at <= $4
-          OR continuum_leases.worker_id = $2
        RETURNING run_id, worker_id, fencing_token, expires_at`,
       [runId, workerId, now + ttlMs, now],
     );
@@ -171,7 +170,7 @@ export class PostgresJournal implements WorkflowJournal {
     await this.ready;
     await this.pool.query(
       `UPDATE continuum_leases
-       SET expires_at = 0
+       SET expires_at = 0, fencing_token = fencing_token + 1
        WHERE run_id = $1 AND worker_id = $2 AND fencing_token = $3`,
       [lease.runId, lease.workerId, lease.fencingToken],
     );

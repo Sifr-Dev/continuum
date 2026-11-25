@@ -221,12 +221,44 @@ test("run leases mutually exclude workers sharing a journal", async () => {
   const first = await journal.acquireRunLease("run-1", "worker-a", 500);
   assert.ok(first);
   assert.equal(await journal.acquireRunLease("run-1", "worker-b", 500), undefined);
+  assert.equal(await journal.acquireRunLease("run-1", "worker-a", 500), undefined);
   assert.equal(await journal.renewRunLease({ ...first, fencingToken: first.fencingToken + 1 }, 500), false);
   assert.equal(await journal.renewRunLease(first, 500), true);
   await journal.releaseRunLease(first);
   const second = await journal.acquireRunLease("run-1", "worker-b", 500);
   assert.equal(second?.workerId, "worker-b");
   assert.ok((second?.fencingToken ?? 0) > first.fencingToken);
+});
+
+
+test("a late step outcome cannot write after its worker lease is released", async () => {
+  class RenewalFailureJournal extends MemoryJournal {
+    override async renewRunLease(): Promise<boolean> {
+      return false;
+    }
+  }
+
+  const journal = new RenewalFailureJournal();
+  const step = defineStep<{}, string>({
+    name: "ignores-abort",
+    execute: async ({ signal }) => {
+      void signal;
+      await sleep(210);
+      return "late";
+    },
+  });
+  const workflow = defineWorkflow<{}, [typeof step]>({ name: "late-outcome", version: 1, steps: [step] });
+  const runtime = new WorkflowRuntime({ journal, context: {}, workerId: "worker-a", leaseTtlMs: 250, random: () => 0.5 });
+  const runId = await runtime.startWorkflow(workflow, {});
+
+  for (let index = 0; index < 20; index += 1) {
+    if ((await journal.events(runId)).some((event) => event.type === "step.started")) break;
+    await sleep(10);
+  }
+  await sleep(320);
+
+  const events = await journal.events(runId);
+  assert.equal(events.some((event) => event.type === "step.succeeded"), false);
 });
 
 test("a second runtime does not duplicate an actively leased workflow", async () => {

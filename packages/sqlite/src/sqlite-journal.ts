@@ -150,7 +150,7 @@ export class SqliteJournal implements WorkflowJournal {
         FROM continuum_leases
         WHERE run_id = ?
       `).get(runId) as LeaseRow | undefined;
-      if (existing && existing.expires_at > now && existing.worker_id !== workerId) return undefined;
+      if (existing && existing.expires_at > now) return undefined;
 
       const fencingToken = (existing?.fencing_token ?? 0) + 1;
       if (existing) {
@@ -181,7 +181,7 @@ export class SqliteJournal implements WorkflowJournal {
   async releaseRunLease(lease: RunLease): Promise<void> {
     this.db.prepare(`
       UPDATE continuum_leases
-      SET expires_at = 0
+      SET expires_at = 0, fencing_token = fencing_token + 1
       WHERE run_id = ? AND worker_id = ? AND fencing_token = ?
     `).run(lease.runId, lease.workerId, lease.fencingToken);
   }
