@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { mkdir, readFile } from "node:fs/promises";
 import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { WorkflowRuntime } from "@continuum/core";
 import { SqliteJournal } from "@continuum/sqlite";
 import { DemoServices, type OrderInput } from "./services.js";
@@ -13,6 +13,11 @@ const publicDir = resolve(__dirname, "../public");
 const dataDir = resolve(process.env.CONTINUUM_DATA_DIR ?? join(process.cwd(), ".continuum"));
 const port = Number(process.env.PORT ?? 4173);
 const host = process.env.HOST ?? "127.0.0.1";
+const operatorToken = process.env.CONTINUUM_OPERATOR_TOKEN?.trim() || undefined;
+const loopbackHost = host === "127.0.0.1" || host === "localhost" || host === "::1";
+if (!loopbackHost && !operatorToken) {
+  throw new Error("Refusing to expose the operations demo without CONTINUUM_OPERATOR_TOKEN");
+}
 
 await mkdir(dataDir, { recursive: true });
 const journal = new SqliteJournal(join(dataDir, "continuum.db"));
@@ -52,6 +57,11 @@ async function shutdown(): Promise<void> {
 async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   const method = request.method ?? "GET";
+
+  if (operatorToken && url.pathname.startsWith("/api/") && !authorizedOperator(request, operatorToken)) {
+    sendJson(response, 401, { error: "operator authentication required" });
+    return;
+  }
 
   if (method === "POST" && !trustedMutation(request)) {
     sendJson(response, 403, { error: "untrusted mutation request" });
@@ -132,6 +142,19 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
   }
 
   sendJson(response, 404, { error: "not found" });
+}
+
+function authorizedOperator(request: IncomingMessage, expectedToken: string): boolean {
+  const authorization = request.headers.authorization;
+  const bearerToken = typeof authorization === "string" && authorization.startsWith("Bearer ")
+    ? authorization.slice("Bearer ".length)
+    : undefined;
+  const headerToken = request.headers["x-continuum-operator-token"];
+  const presented = bearerToken ?? (typeof headerToken === "string" ? headerToken : undefined);
+  if (!presented) return false;
+  const presentedBuffer = Buffer.from(presented);
+  const expectedBuffer = Buffer.from(expectedToken);
+  return presentedBuffer.length === expectedBuffer.length && timingSafeEqual(presentedBuffer, expectedBuffer);
 }
 
 function trustedMutation(request: IncomingMessage): boolean {

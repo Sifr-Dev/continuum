@@ -347,11 +347,24 @@ function renderEffects() {
   }
 }
 
-async function api(path, options = {}) {
+async function api(path, options = {}, retryWithToken = true) {
+  const token = localStorage.getItem("continuum-operator-token");
   const response = await fetch(path, {
     ...options,
-    headers: { "content-type": "application/json", ...(options.headers ?? {}) },
+    headers: {
+      "content-type": "application/json",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...(options.headers ?? {}),
+    },
   });
+  if (response.status === 401 && retryWithToken) {
+    localStorage.removeItem("continuum-operator-token");
+    const entered = window.prompt("Operator token required by this Continuum server");
+    if (entered) {
+      localStorage.setItem("continuum-operator-token", entered);
+      return api(path, options, false);
+    }
+  }
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`${response.status} ${response.statusText}: ${body}`);
