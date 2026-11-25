@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.continuum/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+coverage/
+*.log
