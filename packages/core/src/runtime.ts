@@ -21,6 +21,7 @@ import { isTerminalRunStatus } from "./types.js";
 import { reverseTopologicalOrder, topologicalOrder, validateWorkflow } from "./validation.js";
 
 interface ActiveTask {
+  runId: string;
   stepName: string;
   kind: "step";
   promise: Promise<void>;
@@ -171,8 +172,8 @@ export class WorkflowRuntime<Context = unknown> {
       ]);
     }
 
-    for (const [key, task] of this.activeTasks) {
-      if (key.startsWith(`${runId}:`)) {
+    for (const task of this.activeTasks.values()) {
+      if (task.runId === runId) {
         task.controller.abort(new RunCancelledError(runId));
       }
     }
@@ -485,7 +486,7 @@ export class WorkflowRuntime<Context = unknown> {
       }
     })();
 
-    this.activeTasks.set(key, { stepName: step.name, kind: "step", promise, controller });
+    this.activeTasks.set(key, { runId, stepName: step.name, kind: "step", promise, controller });
   }
 
   private async executeWithTimeout(args: {
@@ -806,9 +807,7 @@ export class WorkflowRuntime<Context = unknown> {
   }
 
   private activeTasksForRun(runId: string): ActiveTask[] {
-    return [...this.activeTasks.entries()]
-      .filter(([key]) => key.startsWith(`${runId}:`))
-      .map(([, task]) => task);
+    return [...this.activeTasks.values()].filter((task) => task.runId === runId);
   }
 
   private waitForWake(runId: string, timeoutMs: number): Promise<void> {
@@ -863,7 +862,7 @@ function workflowKey(definition: AnyWorkflowDefinition): string {
 }
 
 function taskKey(runId: string, stepName: string): string {
-  return `${runId}:${stepName}`;
+  return JSON.stringify([runId, stepName]);
 }
 
 function assertJsonCompatible(value: unknown, label: string, path = "$"): void {

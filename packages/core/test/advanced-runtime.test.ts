@@ -208,6 +208,34 @@ test("concurrent duplicate caller-assigned run ids only create one run", async (
   assert.equal((await journal.allEvents()).filter((event) => event.type === "run.created").length, 1);
 });
 
+test("cancellation only interrupts tasks owned by the exact run id", async () => {
+  const waiting = defineStep<{}, string>({
+    name: "waiting",
+    sideEffect: false,
+    execute: ({ signal }) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => resolve("done"), 80);
+      signal.addEventListener("abort", () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      }, { once: true });
+    }),
+  });
+  const workflow = defineWorkflow<{}, [typeof waiting]>({ name: "exact-cancellation", version: 1, steps: [waiting] });
+  const instance = runtime();
+  const cancelledRun = await instance.startWorkflow(workflow, {}, { runId: "checkout:19" });
+  const unaffectedRun = await instance.startWorkflow(workflow, {}, { runId: "checkout:19:replacement" });
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await instance.cancel(cancelledRun);
+  const [cancelledState, unaffectedState] = await Promise.all([
+    instance.waitForRun(cancelledRun),
+    instance.waitForRun(unaffectedRun),
+  ]);
+
+  assert.equal(cancelledState.status, "cancelled");
+  assert.equal(unaffectedState.status, "succeeded");
+});
+
 test("memory journal isolates stored events from later input mutation", async () => {
   const step = defineStep<Record<string, number>, number>({ name: "step", execute: ({ input }) => input.value });
   const workflow = defineWorkflow<Record<string, number>, [typeof step]>({ name: "immutable-journal", version: 1, steps: [step] });
