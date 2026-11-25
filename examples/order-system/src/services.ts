@@ -1,3 +1,5 @@
+import type { ContinuumEvent } from "@continuum/core";
+
 export type ChaosMode = "none" | "flaky-payment" | "payment-outage" | "inventory-outage" | "slow-payment";
 
 export interface OrderItem {
@@ -48,6 +50,7 @@ export class DemoServices {
 
   private readonly reservationsByKey = new Map<string, Reservation>();
   private readonly paymentsByKey = new Map<string, Payment>();
+  private readonly paymentInFlight = new Map<string, Promise<Payment>>();
   private readonly shipmentsByKey = new Map<string, Shipment>();
   private readonly paymentAttempts = new Map<string, number>();
   private readonly effects: EffectLogEntry[] = [];
@@ -102,10 +105,19 @@ export class DemoServices {
     this.log("inventory.released", key, reservation.reservationId);
   }
 
-  async chargePayment(key: string, order: OrderInput): Promise<Payment> {
+  chargePayment(key: string, order: OrderInput): Promise<Payment> {
     const existing = this.paymentsByKey.get(key);
-    if (existing) return existing;
+    if (existing) return Promise.resolve(existing);
+    const inFlight = this.paymentInFlight.get(key);
+    if (inFlight) return inFlight;
 
+    const capture = this.performChargePayment(key, order);
+    this.paymentInFlight.set(key, capture);
+    capture.finally(() => this.paymentInFlight.delete(key)).catch(() => undefined);
+    return capture;
+  }
+
+  private async performChargePayment(key: string, order: OrderInput): Promise<Payment> {
     const attempts = (this.paymentAttempts.get(key) ?? 0) + 1;
     this.paymentAttempts.set(key, attempts);
 
@@ -166,12 +178,55 @@ export class DemoServices {
     return { messageId };
   }
 
+  restoreFromEvents(events: readonly ContinuumEvent[]): void {
+    const keys = new Map<string, string>();
+    const keyFor = (runId: string, step: string) => keys.get(`${runId}:${step}`) ?? `${runId}:${step}`;
+
+    for (const event of events) {
+      const step = typeof event.data.step === "string" ? event.data.step : undefined;
+      if (!step) continue;
+      if (event.type === "step.started" && typeof event.data.idempotencyKey === "string") {
+        keys.set(`${event.runId}:${step}`, event.data.idempotencyKey);
+        continue;
+      }
+
+      const key = keyFor(event.runId, step);
+      if (event.type === "step.succeeded") {
+        if (step === "reserveInventory") this.restoreReservation(key, event.data.output as Reservation);
+        if (step === "chargePayment") this.paymentsByKey.set(key, event.data.output as Payment);
+        if (step === "createShipment") this.shipmentsByKey.set(key, event.data.output as Shipment);
+      }
+      if (event.type === "compensation.step_completed") {
+        if (step === "reserveInventory") this.restoreRelease(key);
+        if (step === "chargePayment") this.paymentsByKey.delete(key);
+        if (step === "createShipment") this.shipmentsByKey.delete(key);
+      }
+    }
+  }
+
   effectLog(): EffectLogEntry[] {
     return [...this.effects];
   }
 
   inventorySnapshot(): Record<string, number> {
     return Object.fromEntries(this.stock.entries());
+  }
+
+  private restoreReservation(key: string, reservation: Reservation): void {
+    if (this.reservationsByKey.has(key)) return;
+    for (const item of reservation.items) {
+      this.stock.set(item.sku, (this.stock.get(item.sku) ?? 0) - item.quantity);
+    }
+    this.reservationsByKey.set(key, reservation);
+  }
+
+  private restoreRelease(key: string): void {
+    const reservation = this.reservationsByKey.get(key);
+    if (!reservation) return;
+    for (const item of reservation.items) {
+      this.stock.set(item.sku, (this.stock.get(item.sku) ?? 0) + item.quantity);
+    }
+    this.reservationsByKey.delete(key);
   }
 
   private log(type: string, key: string, detail: string): void {
