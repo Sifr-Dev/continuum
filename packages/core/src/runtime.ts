@@ -330,10 +330,24 @@ export class WorkflowRuntime<Context = unknown> {
 
         if (Object.values(state.steps).every((step) => step.status === "succeeded")) {
           const outputs = outputsFromState(state);
-          const output = definition.output
-            ? definition.output({ input: state.input, outputs, runId })
-            : outputs;
-          assertJsonCompatible(output, "workflow output");
+          let output: unknown;
+          try {
+            output = definition.output
+              ? definition.output({ input: state.input, outputs, runId })
+              : outputs;
+            assertJsonCompatible(output, "workflow output");
+          } catch (error) {
+            const serialized = serializeError(error);
+            await this.append([
+              {
+                runId,
+                workflowName: state.workflowName,
+                type: "compensation.started",
+                data: { reason: `workflow output failed: ${serialized.message}` },
+              },
+            ]);
+            continue;
+          }
           await this.append([
             {
               runId,
