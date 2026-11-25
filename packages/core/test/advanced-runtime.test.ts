@@ -165,3 +165,59 @@ test("workflow validation rejects unknown dependencies before writing events", a
   await assert.rejects(() => instance.startWorkflow(workflow, {}), /unknown step/);
   assert.deepEqual(await journal.allEvents(), []);
 });
+
+test("workflow output failure rolls back completed side effects", async () => {
+  let compensated = 0;
+  const effect = defineStep<{}, string>({
+    name: "effect",
+    execute: () => "done",
+    compensate: () => {
+      compensated += 1;
+    },
+  });
+  const workflow = defineWorkflow<{}, [typeof effect]>({
+    name: "output-failure",
+    version: 1,
+    steps: [effect],
+    output: () => {
+      throw new Error("cannot shape output");
+    },
+  });
+
+  const instance = runtime();
+  const runId = await instance.startWorkflow(workflow, {});
+  const state = await instance.waitForRun(runId);
+
+  assert.equal(state.status, "compensated");
+  assert.equal(compensated, 1);
+});
+
+test("concurrent duplicate caller-assigned run ids only create one run", async () => {
+  const step = defineStep<{}, string>({ name: "step", execute: () => "done" });
+  const workflow = defineWorkflow<{}, [typeof step]>({ name: "duplicate-id", version: 1, steps: [step] });
+  const journal = new MemoryJournal();
+  const instance = runtime(journal);
+
+  const results = await Promise.allSettled([
+    instance.startWorkflow(workflow, { input: 1 }, { runId: "same", defer: true }),
+    instance.startWorkflow(workflow, { input: 2 }, { runId: "same", defer: true }),
+  ]);
+
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter((result) => result.status === "rejected").length, 1);
+  assert.equal((await journal.allEvents()).filter((event) => event.type === "run.created").length, 1);
+});
+
+test("memory journal isolates stored events from later input mutation", async () => {
+  const step = defineStep<Record<string, number>, number>({ name: "step", execute: ({ input }) => input.value });
+  const workflow = defineWorkflow<Record<string, number>, [typeof step]>({ name: "immutable-journal", version: 1, steps: [step] });
+  const journal = new MemoryJournal();
+  const instance = runtime(journal);
+  const input = { value: 1 };
+
+  const runId = await instance.startWorkflow(workflow, input, { defer: true });
+  input.value = 99;
+  const created = (await journal.events(runId)).find((event) => event.type === "run.created");
+
+  assert.equal((created?.data.input as { value: number }).value, 1);
+});
