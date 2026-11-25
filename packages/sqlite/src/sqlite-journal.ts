@@ -37,6 +37,10 @@ export class SqliteJournal implements WorkflowJournal {
       INSERT INTO continuum_events (event_id, run_id, workflow_name, type, at, data)
       VALUES (?, ?, ?, ?, ?, ?)
     `);
+    const insertRun = this.db.prepare(`
+      INSERT INTO continuum_runs (run_id, created_at)
+      VALUES (?, ?)
+    `);
 
     const appended: ContinuumEvent[] = [];
     this.db.exec("BEGIN IMMEDIATE");
@@ -50,6 +54,13 @@ export class SqliteJournal implements WorkflowJournal {
           at: event.at ?? Date.now(),
           data: event.data,
         };
+        if (row.type === "run.created") {
+          try {
+            insertRun.run(row.runId, row.at);
+          } catch {
+            throw new Error(`Run "${row.runId}" already exists`);
+          }
+        }
         const result = insert.run(
           row.eventId,
           row.runId,
@@ -132,6 +143,17 @@ export class SqliteJournal implements WorkflowJournal {
 
       CREATE INDEX IF NOT EXISTS idx_continuum_events_type
         ON continuum_events (type);
+
+      CREATE TABLE IF NOT EXISTS continuum_runs (
+        run_id TEXT PRIMARY KEY,
+        created_at INTEGER NOT NULL
+      );
+
+      INSERT OR IGNORE INTO continuum_runs (run_id, created_at)
+      SELECT run_id, MIN(at)
+      FROM continuum_events
+      WHERE type = 'run.created'
+      GROUP BY run_id;
     `);
   }
 }
