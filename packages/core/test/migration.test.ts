@@ -128,6 +128,41 @@ test("a completed step may be removed in the migrating version", async () => {
   await worker.close();
 });
 
+test("migration refuses to discard a completed side effect's compensation", async () => {
+  const journal = new MemoryJournal();
+  const chargeV1 = defineStep<{}, string>({ name: "charge", execute: () => "charged", compensate: () => {} });
+  const pendingV1 = defineStep<{}, never>({ name: "pending", needs: ["charge"], execute: () => new Promise(() => {}) });
+  const workflowV1 = defineWorkflow<{}, [typeof chargeV1, typeof pendingV1]>({ name: "rollback-migration", version: 1, steps: [chargeV1, pendingV1] });
+  const writer = new WorkflowRuntime({ journal, context: {}, random: () => 0.5 });
+  const runId = await writer.startWorkflow(workflowV1, {});
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await writer.close({ graceMs: 0 });
+
+  const pendingV2 = defineStep<{}, string>({ name: "pending", execute: () => "done" });
+  const workflowV2 = defineWorkflow<{}, [typeof pendingV2]>({ name: "rollback-migration", version: 2, steps: [pendingV2], migratesFrom: [1] });
+  const worker = new WorkflowRuntime({ journal, context: {}, random: () => 0.5 });
+  assert.deepEqual(await worker.recover(), [], "a missing rollback handler must block migration");
+  assert.equal((await worker.getRun(runId))?.version, 1);
+  await worker.close();
+});
+
+test("migration refuses steps that were not in the journaled plan", async () => {
+  const journal = new MemoryJournal();
+  const chargeV1 = defineStep<{}, string>({ name: "charge", execute: () => "charged" });
+  const workflowV1 = defineWorkflow<{}, [typeof chargeV1]>({ name: "additive-migration", version: 1, steps: [chargeV1] });
+  const writer = new WorkflowRuntime({ journal, context: {}, random: () => 0.5 });
+  const runId = await writer.startWorkflow(workflowV1, {});
+  await writer.close({ graceMs: 0 });
+
+  const chargeV2 = defineStep<{}, string>({ name: "charge", execute: () => "charged-v2" });
+  const notifyV2 = defineStep<{}, string>({ name: "notify", needs: ["charge"], execute: () => "notified" });
+  const workflowV2 = defineWorkflow<{}, [typeof chargeV2, typeof notifyV2]>({ name: "additive-migration", version: 2, steps: [chargeV2, notifyV2], migratesFrom: [1] });
+  const worker = new WorkflowRuntime({ journal, context: {}, random: () => 0.5 });
+  assert.deepEqual(await worker.recover(), [], "an added step must not be silently omitted from a successful run");
+  assert.equal((await worker.getRun(runId))?.version, 1);
+  await worker.close();
+});
+
 test("migratesFrom is validated", async () => {
   const step = defineStep<{}, number>({ name: "x", execute: () => 1 });
   for (const bad of [[2], [0], [1.5], [1, 1]]) {

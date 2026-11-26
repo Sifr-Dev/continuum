@@ -12,6 +12,8 @@ export { topologicalOrder, validateWorkflow } from "./validation.js";
 export {
   CompensationError,
   ContinuumError,
+  JournalUnavailableError,
+  isJournalError,
   RunAlreadyExistsError,
   RunCancelledError,
   StepInterruptedError,

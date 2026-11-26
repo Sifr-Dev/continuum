@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { resolveRetryPolicy, retryDecision, retryDelayMs } from "./backoff.js";
 import { parseCron, previousCronOccurrence, type CronSpec } from "./cron.js";
-import { RunAlreadyExistsError, RunCancelledError, StepInterruptedError, StepTimeoutError, serializeError } from "./errors.js";
+import { RunAlreadyExistsError, RunCancelledError, StepInterruptedError, StepTimeoutError, isJournalError, serializeError } from "./errors.js";
 import { projectRun, summarizeRun } from "./projection.js";
 import type {
   AnyStepDefinition,
@@ -208,7 +208,18 @@ export class WorkflowRuntime<Context = unknown> {
       .sort((a, b) => b.version - a.version);
     for (const candidate of candidates) {
       const names = new Set(candidate.steps.map((step) => step.name));
-      const compatible = Object.values(state.steps).every((stepState) => terminal.has(stepState.status) || names.has(stepState.name));
+      // Adding a step is not a compatible in-flight migration: the original
+      // journaled plan has no StepState for it, so it could never be executed.
+      if ([...names].some((name) => !state.steps[name])) continue;
+      const compatible = Object.values(state.steps).every((stepState) => {
+        if (!terminal.has(stepState.status) && !names.has(stepState.name)) return false;
+        // A completed side effect remains a rollback obligation after deploy.
+        // Never adopt a definition that has discarded its compensation handler.
+        if (stepState.status === "succeeded" && stepState.sideEffect && stepState.hasCompensation) {
+          return candidate.steps.some((step) => step.name === stepState.name && typeof step.compensate === "function");
+        }
+        return true;
+      });
       if (compatible) return { definition: candidate, migrate: true };
     }
     return undefined;
@@ -540,11 +551,28 @@ export class WorkflowRuntime<Context = unknown> {
     return rows;
   }
 
+  /** Persist an already-computed outcome without executing user code again. */
+  private async appendOutcome(event: NewContinuumEvent, lease: RunLease | undefined): Promise<void> {
+    let delayMs = 10;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        await this.append([event], lease);
+        return;
+      } catch (error) {
+        if (this.closing || !isJournalError(error)) throw error;
+        await sleep(delayMs);
+        delayMs = Math.min(100, delayMs * 2);
+      }
+    }
+    throw new Error("The journal did not become available to record an outcome");
+  }
+
   private pumpInBackground(runId: string): void {
     void this.pump(runId).catch(() => {
-      // Pump failures are usually journal/lease failures. Do not write a terminal
-      // failure outside lease ownership: the durable journal remains recoverable
-      // by the next authoritative worker.
+      // Journal/lease failures are not workflow failures. Keep the durable run
+      // resumable and re-drive this worker as well as any other lease owner.
+      // scheduleLeaseRecovery deduplicates timers and close() cancels them.
+      if (!this.closing) this.scheduleLeaseRecovery(runId, 100);
     });
   }
 
@@ -900,8 +928,8 @@ export class WorkflowRuntime<Context = unknown> {
           }),
         });
         assertJsonCompatible(output, `output of step "${step.name}"`);
-        await this.append([
-          {
+        try {
+          await this.appendOutcome({
             runId,
             workflowName: workflow.name,
             type: "step.succeeded",
@@ -911,9 +939,18 @@ export class WorkflowRuntime<Context = unknown> {
               output: output as JsonObject[string],
               durationMs: this.now() - startedAt,
             },
-          },
-        ], taskLease);
+          }, taskLease);
+        } catch (error) {
+          // The user step has returned successfully. A failed outcome append
+          // is not an application failure and must not execute it again.
+          this.scheduleLeaseRecovery(runId, 100);
+          throw error;
+        }
       } catch (error) {
+        if (isJournalError(error)) {
+          this.scheduleLeaseRecovery(runId, 100);
+          return;
+        }
         const serialized = serializeError(error);
         const cancelled = controller.signal.aborted && controller.signal.reason instanceof RunCancelledError;
         const policy = resolveRetryPolicy(step.retry);
@@ -1070,6 +1107,10 @@ export class WorkflowRuntime<Context = unknown> {
   private async compensateAndFinish(runId: string, workflow: AnyWorkflowDefinition, initialState: RunState): Promise<void> {
     const reverseOrder = this.reverseOrderedSteps.get(`${workflow.name}@${workflow.version}`) ?? reverseTopologicalOrder(workflow.steps);
     const byName = new Map(workflow.steps.map((step) => [step.name, step]));
+    // Rollback follows the journaled plan, including pure steps omitted by a
+    // compatible newer definition. It must not silently skip a completed effect.
+    const rollbackOrder = [...Object.values(initialState.steps)].reverse().map((step) => step.name);
+    for (const stepName of reverseOrder) if (!rollbackOrder.includes(stepName)) rollbackOrder.unshift(stepName);
 
     let state = initialState;
     const pendingSkips = Object.values(state.steps).filter((step) => step.status === "pending");
@@ -1083,11 +1124,7 @@ export class WorkflowRuntime<Context = unknown> {
       state = (await this.getRun(runId)) ?? state;
     }
 
-    const hasCompensationRelevantOutput = reverseOrder.some((stepName) => {
-      const step = byName.get(stepName);
-      const stepState = state.steps[stepName];
-      return step?.sideEffect !== false && stepState?.status === "succeeded";
-    });
+    const hasCompensationRelevantOutput = Object.values(state.steps).some((step) => step.status === "succeeded" && step.sideEffect);
 
     if (!state.compensationStarted && !hasCompensationRelevantOutput) {
       const originalFailure = Object.values(state.steps).find((step) => step.status === "failed")?.error;
@@ -1126,11 +1163,20 @@ export class WorkflowRuntime<Context = unknown> {
       state = (await this.getRun(runId)) ?? state;
     }
 
-    for (const stepName of reverseOrder) {
+    for (const stepName of rollbackOrder) {
       state = (await this.getRun(runId)) ?? state;
       const stepState = state.steps[stepName];
       const step = byName.get(stepName);
-      if (!stepState || !step) continue;
+      if (!stepState) continue;
+      if (!step) {
+        if (stepState.status === "succeeded" && stepState.sideEffect && stepState.hasCompensation) {
+          await this.finishCompensationFailure(runId, workflow.name, new Error(
+            `Compensation for step "${stepName}" is unavailable in workflow version ${workflow.version}`,
+          ));
+          return;
+        }
+        continue;
+      }
       if (["compensated", "compensation_skipped", "skipped", "pending"].includes(stepState.status)) continue;
 
       if (!step.compensate) {
@@ -1159,7 +1205,10 @@ export class WorkflowRuntime<Context = unknown> {
 
         if (current.status === "compensating") {
           const policy = resolveRetryPolicy(step.compensationRetry, DEFAULT_COMPENSATION_RETRY);
-          const decision = retryDecision(policy, current.compensationAttempts, this.now(), this.random);
+          // A crash during rollback is an interruption, not a failed refund.
+          // It gets backoff but never consumes the application retry budget.
+          const delayMs = retryDelayMs(policy, current.compensationAttempts, this.random);
+          const decision = { retryable: true as const, nextAttemptAt: this.now() + delayMs };
           await this.append([
             {
               runId,
@@ -1342,15 +1391,25 @@ export class WorkflowRuntime<Context = unknown> {
         throw controller.signal.reason;
       }
 
-      await this.append([
-        {
+      try {
+        await this.appendOutcome({
           runId,
           workflowName: workflow.name,
           type: "compensation.step_completed",
           data: { step: stepName, attempt, durationMs: this.now() - startedAt },
-        },
-      ]);
+        }, this.activeLeases.get(runId));
+      } catch (error) {
+        // The compensation function has already completed. A failed completion
+        // append is infrastructure, not a failed refund; never run it again as
+        // an application retry.
+        this.scheduleLeaseRecovery(runId, 100);
+        throw error;
+      }
     } catch (error) {
+      if (isJournalError(error)) {
+        this.scheduleLeaseRecovery(runId, 100);
+        return;
+      }
       const interrupted = controller.signal.aborted;
       const policy = resolveRetryPolicy(step.compensationRetry, DEFAULT_COMPENSATION_RETRY);
       const decision = interrupted
