@@ -1,18 +1,22 @@
 /* Continuum Operations Console — restrained monochrome, utility-first.
-   No gradients, no glow, no glass. Ink on paper, one accent: black. */
+   Dark ink-on-paper inversion: near-black canvas, white ink, one accent.
+   No gradients, no glow, no glass. */
 
 :root {
-  color-scheme: light;
-  --bg: #f6f6f7;
-  --surface: #ffffff;
-  --surface-2: #fafafa;
-  --ink: #0a0a0b;
-  --ink-2: #3f3f46;
-  --muted: #71717a;
-  --faint: #a1a1aa;
-  --line: #e4e4e7;
-  --line-strong: #d4d4d8;
-  --fill: #f4f4f5;
+  color-scheme: dark;
+  --bg: #09090b;
+  --surface: #101012;
+  --surface-2: #18181b;
+  --ink: #f4f4f5;
+  --ink-2: #d4d4d8;
+  --muted: #8f8f98;
+  --faint: #5c5c66;
+  --line: #232327;
+  --line-strong: #34343a;
+  --fill: #18181b;
+  --accent: #f4f4f5;
+  --accent-hover: #d4d4d8;
+  --on-accent: #09090b;
   --radius: 8px;
   --radius-sm: 6px;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
@@ -54,13 +58,13 @@ p { color: var(--muted); font-size: 12.5px; }
   place-items: center;
   width: 30px;
   height: 30px;
-  border: 1px solid var(--ink);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
   font-size: 19px;
   font-weight: 700;
   line-height: 1;
   color: var(--ink);
-  background: var(--surface);
+  background: var(--surface-2);
 }
 .brand-text p { margin-top: 1px; font-size: 11.5px; }
 
@@ -78,7 +82,7 @@ p { color: var(--muted); font-size: 12.5px; }
 }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
 .health.ok .dot { background: var(--ink); }
-.health.bad .dot { background: var(--ink); box-shadow: 0 0 0 3px rgba(10, 10, 11, 0.12); }
+.health.bad .dot { background: var(--ink); box-shadow: 0 0 0 3px rgba(244, 244, 245, 0.15); }
 
 /* ---- layout ---- */
 .shell {
@@ -111,12 +115,12 @@ input, select, button {
   font: inherit;
   color: var(--ink);
   border: 1px solid var(--line-strong);
-  background: var(--surface);
+  background: var(--surface-2);
   border-radius: var(--radius-sm);
   outline: none;
 }
 input, select { height: 38px; padding: 0 11px; font-size: 13px; text-transform: none; letter-spacing: normal; }
-input:focus, select:focus { border-color: var(--ink); box-shadow: 0 0 0 3px rgba(10, 10, 11, 0.08); }
+input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(244, 244, 245, 0.08); }
 button {
   height: 38px;
   padding: 0 14px;
@@ -125,19 +129,19 @@ button {
   font-weight: 550;
   transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
-button:hover { border-color: var(--ink); }
+button:hover { border-color: var(--accent); }
 button.primary {
-  border-color: var(--ink);
-  background: var(--ink);
-  color: #fff;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
 }
-button.primary:hover { background: #26262b; border-color: #26262b; }
+button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 button.danger {
-  border-color: var(--ink);
-  background: var(--surface);
+  border-color: var(--line-strong);
+  background: var(--surface-2);
   color: var(--ink);
 }
-button.danger:hover { background: var(--ink); color: #fff; }
+button.danger:hover { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
 button.hidden { display: none; }
 
 .scenario-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
@@ -199,7 +203,7 @@ button.hidden { display: none; }
   border: 1px solid transparent;
 }
 .run-card:hover { border-color: var(--line-strong); }
-.run-card.active { border-color: var(--ink); background: var(--surface); }
+.run-card.active { border-color: var(--accent); background: var(--surface); }
 .run-card .id { font-family: var(--mono); font-size: 10.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-card .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .run-card .row strong { font-weight: 600; font-size: 12.5px; }
@@ -220,11 +224,11 @@ button.hidden { display: none; }
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
-.status-succeeded { background: var(--ink); border-color: var(--ink); color: #fff; }
-.status-running { background: var(--surface); border-color: var(--ink); color: var(--ink); }
-.status-failed, .status-compensation_failed { background: #27272a; border-color: #27272a; color: #fff; }
-.status-compensating, .status-compensated, .status-compensation_pending { background: #52525b; border-color: #52525b; color: #fff; }
-.status-cancelled { background: var(--surface); border-color: var(--ink); border-style: dashed; color: var(--ink); }
+.status-succeeded { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.status-running { background: var(--surface); border-color: var(--accent); color: var(--accent); }
+.status-failed, .status-compensation_failed { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--on-accent); }
+.status-compensating, .status-compensated, .status-compensation_pending { background: var(--muted); border-color: var(--muted); color: var(--on-accent); }
+.status-cancelled { background: var(--surface); border-color: var(--accent); border-style: dashed; color: var(--accent); }
 .status-pending, .status-skipped, .status-compensation_skipped { background: var(--fill); border-color: var(--line); color: var(--muted); }
 
 /* ---- legend ---- */
@@ -232,15 +236,15 @@ button.hidden { display: none; }
 .legend span { display: inline-flex; align-items: center; gap: 5px; }
 .legend i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; border: 1px solid var(--line-strong); }
 .legend .pending { background: var(--fill); }
-.legend .running { background: var(--surface); border-color: var(--ink); }
-.legend .succeeded { background: var(--ink); border-color: var(--ink); }
-.legend .failed { background: #27272a; border-color: #27272a; }
-.legend .compensated { background: #52525b; border-color: #52525b; }
+.legend .running { background: var(--surface); border-color: var(--accent); }
+.legend .succeeded { background: var(--accent); border-color: var(--accent); }
+.legend .failed { background: var(--accent-hover); border-color: var(--accent-hover); }
+.legend .compensated { background: var(--muted); border-color: var(--muted); }
 
 /* ---- DAG ---- */
 #dag { display: block; width: 100%; height: auto; aspect-ratio: 960 / 390; }
 .edge { stroke: var(--line-strong); stroke-width: 1.5; fill: none; }
-.edge.active { stroke: var(--ink); stroke-dasharray: 6 7; animation: dash 1.4s linear infinite; }
+.edge.active { stroke: var(--accent); stroke-dasharray: 6 7; animation: dash 1.4s linear infinite; }
 .node rect {
   fill: var(--surface);
   stroke: var(--line-strong);
@@ -252,16 +256,16 @@ button.hidden { display: none; }
 .node .status-dot { stroke: var(--surface); stroke-width: 2.5px; }
 .node.status-pending rect { stroke: var(--line-strong); stroke-dasharray: 4 4; }
 .node.status-pending .status-dot { fill: var(--faint); }
-.node.status-running rect { stroke: var(--ink); stroke-width: 1.8; }
-.node.status-running .status-dot { fill: var(--ink); animation: pulse 1.2s ease-in-out infinite; }
-.node.status-succeeded rect { stroke: var(--ink); }
-.node.status-succeeded .status-dot { fill: var(--ink); }
-.node.status-failed rect { stroke: var(--ink); stroke-width: 2.4; }
-.node.status-failed .status-dot { fill: var(--ink); }
-.node.status-compensating rect, .node.status-compensation_pending rect { stroke: #52525b; stroke-width: 1.8; }
-.node.status-compensating .status-dot, .node.status-compensation_pending .status-dot { fill: #52525b; animation: pulse 1.2s ease-in-out infinite; }
-.node.status-compensated rect { stroke: #71717a; }
-.node.status-compensated .status-dot { fill: #71717a; }
+.node.status-running rect { stroke: var(--accent); stroke-width: 1.8; }
+.node.status-running .status-dot { fill: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.node.status-succeeded rect { stroke: var(--accent); }
+.node.status-succeeded .status-dot { fill: var(--accent); }
+.node.status-failed rect { stroke: var(--accent); stroke-width: 2.4; }
+.node.status-failed .status-dot { fill: var(--accent); }
+.node.status-compensating rect, .node.status-compensation_pending rect { stroke: var(--muted); stroke-width: 1.8; }
+.node.status-compensating .status-dot, .node.status-compensation_pending .status-dot { fill: var(--muted); animation: pulse 1.2s ease-in-out infinite; }
+.node.status-compensated rect { stroke: var(--faint); }
+.node.status-compensated .status-dot { fill: var(--faint); }
 .node.status-skipped rect, .node.status-compensation_skipped rect { stroke: var(--line-strong); stroke-dasharray: 4 4; }
 .node.status-skipped .status-dot, .node.status-compensation_skipped .status-dot { fill: var(--faint); }
 
@@ -303,7 +307,7 @@ button.hidden { display: none; }
 #inventory { display: grid; gap: 10px; }
 .stock-row { display: grid; grid-template-columns: 110px 1fr 34px; align-items: center; gap: 10px; font-size: 12px; color: var(--ink-2); }
 .stock-bar { height: 7px; overflow: hidden; border-radius: 999px; background: var(--fill); border: 1px solid var(--line); }
-.stock-bar span { display: block; height: 100%; background: var(--ink); border-radius: inherit; }
+.stock-bar span { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
 .stock-row strong { text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
 .effect {
   display: flex;
