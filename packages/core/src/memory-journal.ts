@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { RunAlreadyExistsError, WorkerLeaseLostError } from "./errors.js";
-import type { AppendEventOptions, ContinuumEvent, NewContinuumEvent, RunLease, RunSnapshot, WorkflowJournal } from "./types.js";
+import type { AppendEventOptions, ContinuumEvent, IntegrityChainHead, JournalTransaction, NewContinuumEvent, RunLease, RunSnapshot, WorkflowJournal } from "./types.js";
 
 export class MemoryJournal implements WorkflowJournal {
   private readonly rows: ContinuumEvent[] = [];
   private readonly leases = new Map<string, RunLease>();
   private readonly snapshots = new Map<string, RunSnapshot>();
+  private integrityChainHead: IntegrityChainHead | undefined;
+  private chain: Promise<unknown> = Promise.resolve();
   private seq = 0;
 
   async append(events: readonly NewContinuumEvent[], options: AppendEventOptions = {}): Promise<ContinuumEvent[]> {
@@ -44,6 +46,51 @@ export class MemoryJournal implements WorkflowJournal {
       appended.push(cloneEvent(stored));
     }
     return appended;
+  }
+
+  /**
+   * In-process transaction. There is no shared store to serialize against, so
+   * this only guarantees that the callback sees one consistent state and that
+   * an exception discards everything it wrote.
+   */
+  async transaction<T>(work: (tx: JournalTransaction) => Promise<T>, options: AppendEventOptions = {}): Promise<T> {
+    let release = (): void => undefined;
+    const previous = this.chain;
+    this.chain = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    const rowsBefore = this.rows.length;
+    const seqBefore = this.seq;
+    const headBefore = this.integrityChainHead;
+    const leasesBefore = new Map([...this.leases].map(([key, lease]) => [key, { ...lease }]));
+    try {
+      return await work({
+        appendEvents: (events, appendOptions) => this.append(events, appendOptions ?? options),
+        readIntegrityHead: async () => (this.integrityChainHead ? { ...this.integrityChainHead } : undefined),
+        writeIntegrityHead: async (head) => {
+          this.integrityChainHead = { counter: head.counter, lastHash: head.lastHash };
+        },
+        lastEvent: async () => {
+          const last = this.rows[this.rows.length - 1];
+          return last ? cloneEvent(last) : undefined;
+        },
+        allEvents: () => this.allEvents(),
+      });
+    } catch (error) {
+      this.rows.length = rowsBefore;
+      this.seq = seqBefore;
+      this.integrityChainHead = headBefore;
+      this.leases.clear();
+      for (const [key, lease] of leasesBefore) this.leases.set(key, lease);
+      throw error;
+    } finally {
+      release();
+    }
+  }
+
+  async integrityHead(): Promise<IntegrityChainHead | undefined> {
+    return this.integrityChainHead ? { ...this.integrityChainHead } : undefined;
   }
 
   async events(runId: string): Promise<ContinuumEvent[]> {

@@ -1,7 +1,18 @@
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { RunAlreadyExistsError, WorkerLeaseLostError } from "@continuum/core";
-import type { AppendEventOptions, ContinuumEvent, ContinuumEventType, NewContinuumEvent, RunLease, RunSnapshot, RunState, WorkflowJournal } from "@continuum/core";
+import type {
+  AppendEventOptions,
+  ContinuumEvent,
+  ContinuumEventType,
+  IntegrityChainHead,
+  JournalTransaction,
+  NewContinuumEvent,
+  RunLease,
+  RunSnapshot,
+  RunState,
+  WorkflowJournal,
+} from "@continuum/core";
 
 export interface SqliteJournalOptions {
   filename: string;
@@ -69,6 +80,112 @@ export class SqliteJournal implements WorkflowJournal {
 
   async append(events: readonly NewContinuumEvent[], options: AppendEventOptions = {}): Promise<ContinuumEvent[]> {
     if (events.length === 0) return [];
+    // Share the in-process file lock with transaction() so a plain append can
+    // never busy-wait on a write lock held by an async transaction in this same
+    // process: better-sqlite3 is synchronous, so that wait would stall the event
+    // loop the transaction needs to finish. Cross-process serialization is
+    // still SQLite's own write lock.
+    const release = await acquireFileLock(this.db.name);
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        const appended = this.appendRows(events, options);
+        this.db.exec("COMMIT");
+        return appended;
+      } catch (error) {
+        this.rollbackQuietly();
+        throw error;
+      }
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * Run `work` inside one `BEGIN IMMEDIATE` transaction.
+   *
+   * `BEGIN IMMEDIATE` takes the database write lock up front, so the chain head
+   * read inside `work` and every write it makes are serialized against all
+   * other writers of this database file — in this process and in any other
+   * process using SQLite. A deferred transaction would read a stale snapshot
+   * and fail with SQLITE_BUSY_SNAPSHOT instead of serializing.
+   *
+   * Within one process, transactions on the same database file are additionally
+   * queued cooperatively: better-sqlite3 is synchronous, so a second connection
+   * in this process that busy-waited for the write lock would block the event
+   * loop that the first transaction needs in order to finish.
+   */
+  async transaction<T>(work: (tx: JournalTransaction) => Promise<T>, options: AppendEventOptions = {}): Promise<T> {
+    const release = await acquireFileLock(this.db.name);
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        const result = await work({
+          appendEvents: async (events, appendOptions) => this.appendRows(events, appendOptions ?? options),
+          readIntegrityHead: async () => this.readIntegrityHeadRow(),
+          writeIntegrityHead: async (head) => {
+            this.db.prepare(`
+              INSERT INTO continuum_integrity_head (id, counter, last_hash)
+              VALUES (0, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET counter = excluded.counter, last_hash = excluded.last_hash
+            `).run(head.counter, head.lastHash);
+          },
+          lastEvent: async () => this.lastEventRow(),
+          allEvents: async () => this.allEventRows(),
+        });
+        this.db.exec("COMMIT");
+        return result;
+      } catch (error) {
+        this.rollbackQuietly();
+        throw error;
+      }
+    } finally {
+      release();
+    }
+  }
+
+  async integrityHead(): Promise<IntegrityChainHead | undefined> {
+    return this.readIntegrityHeadRow();
+  }
+
+  private readIntegrityHeadRow(): IntegrityChainHead | undefined {
+    const row = this.db.prepare(`
+      SELECT counter, last_hash FROM continuum_integrity_head WHERE id = 0
+    `).get() as { counter: number; last_hash: string } | undefined;
+    // A counter of 0 means "the chain is empty", which is different from "this
+    // store keeps no durable head at all"; keep the distinction so verification
+    // can tell an empty journal apart from a truncated one.
+    if (!row) return undefined;
+    return { counter: row.counter, lastHash: row.last_hash };
+  }
+
+  private lastEventRow(): ContinuumEvent | undefined {
+    const row = this.db.prepare(`
+      SELECT seq, event_id, run_id, workflow_name, type, at, data
+      FROM continuum_events
+      ORDER BY seq DESC
+      LIMIT 1
+    `).get() as EventRow | undefined;
+    return row ? rowToEvent(row) : undefined;
+  }
+
+  private allEventRows(): ContinuumEvent[] {
+    const rows = this.db.prepare(`
+      SELECT seq, event_id, run_id, workflow_name, type, at, data
+      FROM continuum_events
+      ORDER BY seq ASC
+    `).all() as unknown as EventRow[];
+    return rows.map(rowToEvent);
+  }
+
+  /**
+   * The journal's normal append semantics, shared by {@link append} and by
+   * `transaction()`'s `appendEvents`. It never opens a transaction of its own:
+   * the caller owns the transaction boundary so chain state and events commit
+   * or roll back together.
+   */
+  private appendRows(events: readonly NewContinuumEvent[], options: AppendEventOptions = {}): ContinuumEvent[] {
+    if (events.length === 0) return [];
     const insert = this.db.prepare(`
       INSERT INTO continuum_events (event_id, run_id, workflow_name, type, at, data)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -79,63 +196,56 @@ export class SqliteJournal implements WorkflowJournal {
     `);
 
     const appended: ContinuumEvent[] = [];
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const lease = options.lease;
-      if (lease) {
-        const current = this.db.prepare(`
-          SELECT worker_id, fencing_token
-          FROM continuum_leases
-          WHERE run_id = ?
-        `).get(lease.runId) as Pick<LeaseRow, "worker_id" | "fencing_token"> | undefined;
-        if (
-          events.some((event) => event.runId !== lease.runId) ||
-          !current ||
-          current.worker_id !== lease.workerId ||
-          current.fencing_token !== lease.fencingToken
-        ) {
-          throw new WorkerLeaseLostError(lease.runId);
-        }
+    const lease = options.lease;
+    if (lease) {
+      const current = this.db.prepare(`
+        SELECT worker_id, fencing_token
+        FROM continuum_leases
+        WHERE run_id = ?
+      `).get(lease.runId) as Pick<LeaseRow, "worker_id" | "fencing_token"> | undefined;
+      if (
+        events.some((event) => event.runId !== lease.runId) ||
+        !current ||
+        current.worker_id !== lease.workerId ||
+        current.fencing_token !== lease.fencingToken
+      ) {
+        throw new WorkerLeaseLostError(lease.runId);
       }
+    }
 
-      for (const event of events) {
-        const row = {
-          eventId: randomUUID(),
-          runId: event.runId,
-          workflowName: event.workflowName,
-          type: event.type,
-          at: event.at ?? Date.now(),
-          data: event.data,
-        };
-        if (row.type === "run.created") {
-          try {
-            insertRun.run(row.runId, row.at);
-          } catch {
-            throw new RunAlreadyExistsError(row.runId);
-          }
+    for (const event of events) {
+      const row = {
+        eventId: randomUUID(),
+        runId: event.runId,
+        workflowName: event.workflowName,
+        type: event.type,
+        at: event.at ?? Date.now(),
+        data: event.data,
+      };
+      if (row.type === "run.created") {
+        try {
+          insertRun.run(row.runId, row.at);
+        } catch {
+          throw new RunAlreadyExistsError(row.runId);
         }
-        const result = insert.run(
-          row.eventId,
-          row.runId,
-          row.workflowName,
-          row.type,
-          row.at,
-          JSON.stringify(row.data),
-        );
-        appended.push({
-          seq: Number(result.lastInsertRowid),
-          eventId: row.eventId,
-          runId: row.runId,
-          workflowName: row.workflowName,
-          type: row.type,
-          at: row.at,
-          data: row.data,
-        });
       }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.rollbackQuietly();
-      throw error;
+      const result = insert.run(
+        row.eventId,
+        row.runId,
+        row.workflowName,
+        row.type,
+        row.at,
+        JSON.stringify(row.data),
+      );
+      appended.push({
+        seq: Number(result.lastInsertRowid),
+        eventId: row.eventId,
+        runId: row.runId,
+        workflowName: row.workflowName,
+        type: row.type,
+        at: row.at,
+        data: row.data,
+      });
     }
     return appended;
   }
@@ -286,12 +396,40 @@ export class SqliteJournal implements WorkflowJournal {
     }
   }
 
+  /**
+   * Create the schema. Serialized across processes with `BEGIN IMMEDIATE` and
+   * retried on SQLITE_BUSY: two processes opening the same brand-new file at
+   * once would otherwise race on the WAL switch, which needs an exclusive lock
+   * and fails immediately rather than waiting for the busy timeout.
+   */
   private migrate(): void {
-    this.db.exec(`
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = NORMAL;
-      PRAGMA foreign_keys = ON;
+    let attempt = 0;
+    for (;;) {
+      try {
+        this.migrateOnce();
+        return;
+      } catch (error) {
+        const busy = (error as { code?: string }).code === "SQLITE_BUSY";
+        if (!busy || attempt >= 50) throw error;
+        attempt += 1;
+        // Synchronous sleep: this runs in the constructor, before the journal
+        // is usable, and the schema must exist before anything else touches it.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10 * attempt);
+      }
+    }
+  }
 
+  private migrateOnce(): void {
+    // Connection pragmas must be set outside a transaction; switching an
+    // existing database to WAL takes an exclusive lock, so it also needs the
+    // busy retry handled by the caller.
+    this.db.pragma("journal_mode = WAL");
+    this.db.pragma("synchronous = NORMAL");
+    this.db.pragma("foreign_keys = ON");
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.exec(`
       CREATE TABLE IF NOT EXISTS continuum_events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT,
         event_id TEXT NOT NULL UNIQUE,
@@ -329,13 +467,73 @@ export class SqliteJournal implements WorkflowJournal {
         state TEXT NOT NULL CHECK (json_valid(state))
       );
 
+      -- Durable hash-chain head. One row, id 0. It is advanced in the same
+      -- transaction as the events it covers, which is what makes tail
+      -- truncation detectable: without a persisted head any prefix of a valid
+      -- chain is itself a valid chain.
+      CREATE TABLE IF NOT EXISTS continuum_integrity_head (
+        id INTEGER PRIMARY KEY CHECK (id = 0),
+        counter INTEGER NOT NULL,
+        last_hash TEXT NOT NULL,
+        CHECK (counter >= 0)
+      );
+
       INSERT OR IGNORE INTO continuum_runs (run_id, created_at)
       SELECT run_id, MIN(at)
       FROM continuum_events
       WHERE type = 'run.created'
       GROUP BY run_id;
-    `);
+
+      -- Seed the head from the last journaled link when the table is new, so a
+      -- database written by an earlier version (or by an adapter-only writer
+      -- that predates the head) continues instead of forking at GENESIS.
+      INSERT OR IGNORE INTO continuum_integrity_head (id, counter, last_hash)
+      SELECT 0,
+        COALESCE(
+          (SELECT CAST(json_extract(data, '$."__integrity".i') AS INTEGER) + 1
+           FROM continuum_events
+           ORDER BY seq DESC
+           LIMIT 1),
+          0
+        ),
+        COALESCE(
+          (SELECT json_extract(data, '$."__integrity".hash')
+           FROM continuum_events
+           ORDER BY seq DESC
+           LIMIT 1),
+          ''
+        );
+      `);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.rollbackQuietly();
+      throw error;
+    }
   }
+}
+
+/**
+ * In-process async mutex per database file. Node is single-threaded and
+ * better-sqlite3 is synchronous, so a second connection that busy-waits for the
+ * write lock would stall the very event loop the lock holder needs; queueing
+ * transactions cooperatively avoids that self-deadlock. Cross-process
+ * serialization is still SQLite's own write lock.
+ */
+const fileLocks = new Map<string, Promise<void>>();
+
+async function acquireFileLock(key: string): Promise<() => void> {
+  const previous = fileLocks.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const chained = previous.then(() => current);
+  fileLocks.set(key, chained);
+  await previous;
+  return () => {
+    release();
+    if (fileLocks.get(key) === chained) fileLocks.delete(key);
+  };
 }
 
 function rowToEvent(row: EventRow): ContinuumEvent {
