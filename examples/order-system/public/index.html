@@ -3,15 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Continuum Operations Console</title>
+    <title>Continuum — Operations Console</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div class="background-grid"></div>
     <header class="topbar">
       <div class="brand">
-        <div class="mark">∞</div>
-        <div>
+        <span class="mark" aria-hidden="true">∞</span>
+        <div class="brand-text">
           <h1>Continuum</h1>
           <p>Durable execution operations console</p>
         </div>
@@ -20,7 +19,7 @@
     </header>
 
     <main class="shell">
-      <section class="control-panel glass">
+      <section class="panel control-panel">
         <div class="panel-heading">
           <div>
             <h2>Order workflow</h2>
@@ -63,31 +62,31 @@
         </form>
 
         <div class="scenario-row">
-          <button data-scenario="none">Happy path</button>
-          <button data-scenario="flaky-payment">Flaky payment</button>
-          <button data-scenario="payment-outage">Rollback saga</button>
-          <button data-scenario="slow-payment">Timeout retry</button>
-          <button data-review-order>Manual review</button>
+          <button type="button" data-scenario="none">Happy path</button>
+          <button type="button" data-scenario="flaky-payment">Flaky payment</button>
+          <button type="button" data-scenario="payment-outage">Rollback saga</button>
+          <button type="button" data-scenario="slow-payment">Timeout retry</button>
+          <button type="button" data-review-order>Manual review</button>
         </div>
       </section>
 
       <section class="metrics" id="metrics">
-        <article class="metric glass"><span>Total runs</span><strong id="metric-total">0</strong></article>
-        <article class="metric glass"><span>Succeeded</span><strong id="metric-succeeded">0</strong></article>
-        <article class="metric glass"><span>Compensated</span><strong id="metric-compensated">0</strong></article>
-        <article class="metric glass"><span>Events</span><strong id="metric-events">0</strong></article>
+        <article class="metric"><span>Total runs</span><strong id="metric-total">0</strong></article>
+        <article class="metric"><span>Succeeded</span><strong id="metric-succeeded">0</strong></article>
+        <article class="metric"><span>Compensated</span><strong id="metric-compensated">0</strong></article>
+        <article class="metric"><span>Events</span><strong id="metric-events">0</strong></article>
       </section>
 
       <section class="workspace">
-        <aside class="runs glass">
+        <aside class="runs panel">
           <div class="section-title">
             <h2>Runs</h2>
-            <button id="refresh" title="Refresh">↻</button>
+            <button id="refresh" title="Refresh" aria-label="Refresh">↻</button>
           </div>
           <div id="run-list" class="run-list empty">No workflow runs yet</div>
         </aside>
 
-        <section class="dag-panel glass">
+        <section class="dag-panel panel">
           <div class="section-title run-heading">
             <div>
               <h2 id="selected-title">Select a run</h2>
@@ -109,18 +108,18 @@
           <svg id="dag" viewBox="0 0 960 390" role="img" aria-label="Workflow graph"></svg>
         </section>
 
-        <aside class="timeline glass">
+        <aside class="timeline panel">
           <div class="section-title"><h2>Event journal</h2></div>
           <div id="event-list" class="event-list empty">Durable events appear here</div>
         </aside>
       </section>
 
       <section class="bottom-grid">
-        <article class="glass inventory">
+        <article class="inventory panel">
           <div class="section-title"><h2>Inventory</h2></div>
           <div id="inventory"></div>
         </article>
-        <article class="glass effects">
+        <article class="effects panel">
           <div class="section-title"><h2>External effect log</h2></div>
           <div id="effect-log" class="effect-log empty">No side effects yet</div>
         </article>
