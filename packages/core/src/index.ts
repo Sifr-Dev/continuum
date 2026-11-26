@@ -3,6 +3,8 @@ export { ContinuumMetrics } from "./metrics.js";
 export { WorkflowRuntime } from "./runtime.js";
 export { parseCron, previousCronOccurrence, nextCronOccurrence, recentCronOccurrences, CronParseError, CRON_DAY_MS } from "./cron.js";
 export type { CronSpec } from "./cron.js";
+export { IntegrityJournal, verifyEventChain, stableStringify, stripIntegrity } from "./integrity.js";
+export type { IntegrityLink, IntegrityReport, IntegrityJournalOptions } from "./integrity.js";
 export { projectRun, projectSummaries, summarizeRun } from "./projection.js";
 export { retryDecision, retryDelayMs, resolveRetryPolicy } from "./backoff.js";
 export { topologicalOrder, validateWorkflow } from "./validation.js";

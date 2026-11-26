@@ -285,6 +285,10 @@ Continuum deliberately uses an **at-least-once execution** model. The framework 
 
 Application steps that perform external effects should use the provided idempotency key in the downstream system. Compensation functions must also be idempotent because a worker can crash after performing a compensation but before recording its completion.
 
+## Tamper-evident history
+
+`IntegrityJournal` decorates any journal (memory, SQLite, Postgres) with a SHA-256 hash chain. Every appended event is stamped with a link that commits to its content and to the previous link, persisted inside the event payload so it survives restarts and needs no adapter changes. `verifyEventChain` (or `journal.verify()`) then proves the history has not been edited, reordered, truncated, or duplicated — any change is reported with the exact broken index. Appends are serialized through the decorator so concurrent writers cannot fork the chain, and a fresh decorator adopts the existing chain state after a restart. This makes tampering *detectable* end to end; it complements, and does not replace, database access controls.
+
 ## Architecture
 
 At a high level:
