@@ -14,6 +14,16 @@ continuum leases --db ./continuum.db
 continuum export --db ./continuum.db --out events.json
 ```
 
+`list` and `inspect` add an operator **phase** on top of the stored status
+(`executing`, `awaiting_retry`, `awaiting_timer`, `awaiting_signal`,
+`runnable`, `cancel_requested`, `compensating`, `blocked`, `terminal`), so a
+`running` run waiting for a human approval is distinguishable from one that is
+actually executing or stuck without a worker.
+
+`recover` waits for adopted runs only until they finish or park on external
+input, then exits `0` for healthy parking and `1` for `failed`,
+`compensation_failed`, or runs still moving when `--recover-timeout` expires.
+
 Use PostgreSQL for distributed workers:
 
 ```bash

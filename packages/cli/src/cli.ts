@@ -4,10 +4,11 @@ import { createServer, type Server } from "node:http";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ContinuumMetrics, IntegrityJournal, WorkflowRuntime, nextCronOccurrence, parseCron, verifyEventChain, type AnyWorkflowDefinition, type WorkflowJournal } from "@continuum/core";
+import { ContinuumMetrics, IntegrityJournal, WorkflowRuntime, nextCronOccurrence, parseCron, projectRun, summarizeRun, verifyEventChain, type AnyWorkflowDefinition, type RunSummary, type WorkflowJournal } from "@continuum/core";
 import { PostgresJournal } from "@continuum/postgres";
 import { SqliteJournal } from "@continuum/sqlite";
 import { formatRunSummary, formatStepTable, json, parseWorkflowSelector, table } from "./format.js";
+import { classifyRun, formatPhase, formatRecoveryReport, recoveryExitCode, settleRuns } from "./status.js";
 
 const HELP = `continuum - operations CLI for durable workflows
 
@@ -18,7 +19,7 @@ Usage:
   continuum cancel <run-id> [--db file] [--workflows module.js] [--reason text]
   continuum signal <run-id> <signal-name> [--payload '{"json":true}'] [--db file]
   continuum query <run-id> <query-name> --workflows module.js [--db file]
-  continuum recover --workflows module.js [--db file]
+  continuum recover --workflows module.js [--db file] [--recover-timeout ms] [--events]
   continuum worker --workflows module.js [--db file] [--postgres url] [--lease-ttl ms] [--metrics-port port] [--shutdown-grace ms] [--max-concurrent-steps n]
   continuum leases [--db file] [--postgres url]
   continuum export [--db file] [--out file]
@@ -57,6 +58,8 @@ async function main(argv: string[]): Promise<number> {
       "max-concurrent-steps": { type: "string" },
       metricsPort: { type: "string" },
       "metrics-port": { type: "string" },
+      recoverTimeout: { type: "string" },
+      "recover-timeout": { type: "string" },
       events: { type: "boolean", default: false },
       wait: { type: "boolean", default: false },
     },
@@ -65,6 +68,11 @@ async function main(argv: string[]): Promise<number> {
   const leaseTtl = values["lease-ttl"] ?? values.leaseTtl;
   const metricsPort = values["metrics-port"] ?? values.metricsPort;
   const maxConcurrentSteps = values["max-concurrent-steps"] ?? values.maxConcurrentSteps;
+  const recoverTimeoutRaw = values["recover-timeout"] ?? values.recoverTimeout;
+  if (recoverTimeoutRaw !== undefined && (!Number.isInteger(Number(recoverTimeoutRaw)) || Number(recoverTimeoutRaw) < 0)) {
+    throw new Error("--recover-timeout must be a non-negative integer number of milliseconds");
+  }
+  const recoverTimeoutMs = recoverTimeoutRaw !== undefined ? Number(recoverTimeoutRaw) : 30_000;
 
   // `next` is pure cron lookahead and needs no journal, so handle it before
   // opening a database to avoid creating one as a side effect.
@@ -104,17 +112,27 @@ async function main(argv: string[]): Promise<number> {
   try {
     switch (command) {
       case "list": {
-        const runs = await runtime.listRuns();
-        if (runs.length === 0) {
+        // Single journal pass: read each run once, then project and classify.
+        // Calling runtime.listRuns() and then getRun() per run doubled the
+        // reads on large journals for no benefit.
+        const now = Date.now();
+        const entries = (await Promise.all((await journal.runIds()).map(async (runId) => {
+          const state = projectRun(await journal.events(runId));
+          return state ? { summary: summarizeRun(state), phase: classifyRun(state, now) } : undefined;
+        })))
+          .filter((entry): entry is { summary: RunSummary; phase: ReturnType<typeof classifyRun> } => entry !== undefined)
+          .sort((a, b) => b.summary.createdAt - a.summary.createdAt);
+        if (entries.length === 0) {
           console.log("No workflow runs found.");
           return 0;
         }
         console.log(table(
-          ["run", "workflow", "status", "events", "created", "error"],
-          runs.map((run) => [
+          ["run", "workflow", "status", "phase", "events", "created", "error"],
+          entries.map(({ summary: run, phase }) => [
             run.runId,
             `${run.workflowName}@${run.version}`,
             run.status,
+            phase.phase,
             String(run.eventCount),
             new Date(run.createdAt).toISOString(),
             run.error?.message ?? "",
@@ -129,6 +147,7 @@ async function main(argv: string[]): Promise<number> {
         const state = await runtime.getRun(runId);
         if (!state) throw new Error(`Run "${runId}" does not exist`);
         console.log(formatRunSummary({ ...state }));
+        console.log(formatPhase(classifyRun(state)));
         console.log("\nSteps");
         console.log(formatStepTable(state));
         if (values.events) {
@@ -182,7 +201,21 @@ async function main(argv: string[]): Promise<number> {
           const state = await runtime.waitForRun(runId);
           console.log(`Cancellation finished for ${runId} with status ${state.status}`);
         } else {
-          console.log(`Cancellation requested for ${runId}`);
+          // Without the workflow module this process cannot execute the
+          // rollback, so report the request as pending rather than pretending
+          // the run is cancelled: a worker still has to adopt and roll it back.
+          const state = await runtime.getRun(runId);
+          const phase = state ? classifyRun(state) : undefined;
+          if (state && phase?.phase === "terminal") {
+            console.log(`${runId} is already ${state.status}; nothing to cancel.`);
+          } else {
+            console.log(`Cancellation requested for ${runId}; status is still ${state?.status ?? "unknown"}.`);
+            if (phase) {
+              console.log(`  phase: ${phase.phase} — ${phase.detail}`);
+              if (phase.signal) console.log(`  unblock separately: continuum signal ${runId} ${phase.signal} --payload '{"approved":false}'`);
+            }
+            console.log("  A worker holding this workflow definition must adopt the run to finish the rollback.");
+          }
         }
         return 0;
       }
@@ -191,9 +224,19 @@ async function main(argv: string[]): Promise<number> {
         const workflows = await loadWorkflows(required(values.workflows, "--workflows is required for recover"));
         for (const workflow of workflows) runtime.registerWorkflow(workflow);
         const recovered = await runtime.recover();
-        const states = await Promise.all(recovered.map((runId) => runtime.waitForRun(runId)));
-        console.log(json({ recovered, count: recovered.length, statuses: states.map((state) => ({ runId: state.runId, status: state.status })) }));
-        return 0;
+        if (recovered.length === 0) {
+          console.log("No recoverable runs found.");
+          return 0;
+        }
+        const results = await settleRuns(
+          (runId) => runtime.getRun(runId),
+          recovered,
+          { timeoutMs: recoverTimeoutMs, now: () => Date.now() },
+        );
+        console.log(formatRecoveryReport(results));
+        const exitCode = recoveryExitCode(results);
+        if (values.events) console.log(json(results));
+        return exitCode;
       }
 
       case "worker": {
