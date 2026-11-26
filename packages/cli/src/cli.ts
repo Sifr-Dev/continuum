@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ContinuumMetrics, WorkflowRuntime, type AnyWorkflowDefinition, type WorkflowJournal } from "@continuum/core";
+import { ContinuumMetrics, IntegrityJournal, WorkflowRuntime, verifyEventChain, type AnyWorkflowDefinition, type WorkflowJournal } from "@continuum/core";
 import { PostgresJournal } from "@continuum/postgres";
 import { SqliteJournal } from "@continuum/sqlite";
 import { formatRunSummary, formatStepTable, json, parseWorkflowSelector, table } from "./format.js";
@@ -22,6 +22,7 @@ Usage:
   continuum worker --workflows module.js [--db file] [--postgres url] [--lease-ttl ms] [--metrics-port port] [--shutdown-grace ms] [--max-concurrent-steps n]
   continuum leases [--db file] [--postgres url]
   continuum export [--db file] [--out file]
+  continuum verify [--db file] [--postgres url]
 
 Examples:
   continuum start checkout@1 --workflows ./dist/workflows.js --input '{"orderId":"ord_1"}' --wait
@@ -241,6 +242,16 @@ async function main(argv: string[]): Promise<number> {
         return 0;
       }
 
+      case "verify": {
+        const report = await verifyEventChain(await journal.allEvents());
+        if (report.ok) {
+          console.log(`integrity OK: ${report.verified} event(s) verified`);
+          return 0;
+        }
+        console.error(`integrity FAILED at index ${report.brokenAt}: ${report.reason}`);
+        return 1;
+      }
+
       default:
         throw new Error(`Unknown command "${command}"\n\n${HELP}`);
     }
@@ -298,8 +309,8 @@ async function startMetricsServer(runtime: WorkflowRuntime<unknown>, journal: Wo
 }
 
 function createJournal(postgresUrl: string | undefined, sqlitePath: string): WorkflowJournal {
-  if (postgresUrl) return new PostgresJournal(postgresUrl);
-  return new SqliteJournal(sqlitePath);
+  const inner = postgresUrl ? new PostgresJournal(postgresUrl) : new SqliteJournal(sqlitePath);
+  return new IntegrityJournal(inner);
 }
 
 function required(value: unknown, message: string): string {

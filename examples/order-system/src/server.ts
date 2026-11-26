@@ -5,6 +5,7 @@ import { extname, join, normalize, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { WorkflowRuntime } from "@continuum/core";
+import { IntegrityJournal, stripIntegrity } from "@continuum/core";
 import { SqliteJournal } from "@continuum/sqlite";
 import { DemoServices, type OrderInput } from "./services.js";
 import { createCheckoutWorkflow } from "./workflows.js";
@@ -26,7 +27,7 @@ if (!loopbackHost && (!operatorToken || !tlsKeyPath || !tlsCertPath)) {
 }
 
 await mkdir(dataDir, { recursive: true });
-const journal = new SqliteJournal(join(dataDir, "continuum.db"));
+const journal = new IntegrityJournal(new SqliteJournal(join(dataDir, "continuum.db")));
 const services = new DemoServices();
 const checkoutWorkflow = createCheckoutWorkflow(services);
 const runtime = new WorkflowRuntime({ journal, context: services, concurrency: 4 });
@@ -61,7 +62,7 @@ process.on("SIGTERM", shutdown);
 
 async function shutdown(): Promise<void> {
   server.close();
-  await journal.close();
+  await journal.close?.();
   process.exit(0);
 }
 
@@ -97,7 +98,7 @@ async function route(request: IncomingMessage, response: ServerResponse): Promis
       sendJson(response, 404, { error: "run not found" });
       return;
     }
-    sendJson(response, 200, { run, events: await runtime.getEvents(runId) });
+    sendJson(response, 200, { run, events: (await runtime.getEvents(runId)).map((event) => ({ ...event, data: stripIntegrity(event.data) })) });
     return;
   }
 
