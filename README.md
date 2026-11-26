@@ -96,7 +96,7 @@ docs                   architecture and operational semantics
 
 ## Quick start
 
-Requires Node.js 22.5+.
+Requires Node.js 22.5+ (tested in CI on Node 22 and Node 26).
 
 ```bash
 npm install
@@ -344,4 +344,4 @@ npm run build
 npm run demo
 ```
 
-CI runs typechecking, all unit/integration tests, and builds on Node 22 with a PostgreSQL service.
+CI runs typechecking, all unit/integration tests, and builds on Node 22 and 26 with a PostgreSQL 18 service.
