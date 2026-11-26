@@ -329,6 +329,46 @@ export interface AppendEventOptions {
   lease?: RunLease;
 }
 
+/**
+ * Durable position of a hash chain, persisted by a journal adapter in the same
+ * transaction as the events it covers. `counter` is the number of committed
+ * chain links and `lastHash` is the hash of the most recent link.
+ *
+ * A persisted head is what makes truncation — especially deletion of the tail
+ * of the history — detectable: without it, any prefix of a valid chain is
+ * itself a valid chain.
+ */
+export interface IntegrityChainHead {
+  counter: number;
+  lastHash: string;
+}
+
+/**
+ * Work performed inside ONE durable journal transaction.
+ *
+ * Every method runs on the transaction's connection and snapshot, so reads and
+ * writes observe a single consistent state and commit or roll back together.
+ * This is the boundary a hash chain needs: read the chain head, append the
+ * stamped events, and advance the head in one atomic unit, serialized against
+ * every other writer of the store — including writers in other processes.
+ */
+export interface JournalTransaction {
+  /**
+   * Append events with the journal's normal semantics — generated event ids,
+   * seq assignment, `run.created` uniqueness, and lease fencing — inside this
+   * transaction. `options` defaults to the options passed to `transaction`.
+   */
+  appendEvents(events: readonly NewContinuumEvent[], options?: AppendEventOptions): Promise<ContinuumEvent[]>;
+  /** Persisted chain head, or undefined when the store has never sealed one. */
+  readIntegrityHead(): Promise<IntegrityChainHead | undefined>;
+  /** Persist a chain head; must be atomic with the covered appends. */
+  writeIntegrityHead(head: IntegrityChainHead): Promise<void>;
+  /** Most recent event in seq order, or undefined for an empty store. */
+  lastEvent(): Promise<ContinuumEvent | undefined>;
+  /** All events in seq order, read inside the transaction. */
+  allEvents(): Promise<ContinuumEvent[]>;
+}
+
 export interface WorkflowJournal {
   append(events: readonly NewContinuumEvent[], options?: AppendEventOptions): Promise<ContinuumEvent[]>;
   events(runId: string): Promise<ContinuumEvent[]>;
@@ -336,6 +376,20 @@ export interface WorkflowJournal {
   eventsAfter?(runId: string, afterSeq: number): Promise<ContinuumEvent[]>;
   allEvents(): Promise<ContinuumEvent[]>;
   runIds(): Promise<string[]>;
+  /**
+   * Run `work` inside one durable transaction that is serialized against every
+   * other writer of the same store, including writers in other processes.
+   *
+   * Optional: journals that cannot provide a cross-process transaction
+   * boundary omit it, and `IntegrityJournal` then falls back to in-process
+   * serialization, which cannot protect a chain shared by several processes.
+   */
+  transaction?<T>(work: (tx: JournalTransaction) => Promise<T>, options?: AppendEventOptions): Promise<T>;
+  /**
+   * Durable hash-chain head, when the adapter persists one. Used by
+   * `IntegrityJournal.verify()` to prove the history was not truncated.
+   */
+  integrityHead?(): Promise<IntegrityChainHead | undefined>;
   /** Atomically acquire or re-acquire a run worker lease. Implementations must be safe across processes. */
   acquireRunLease?(runId: string, workerId: string, ttlMs: number): Promise<RunLease | undefined>;
   /** Renew a still-owned lease; returns false when fencing no longer matches. */
