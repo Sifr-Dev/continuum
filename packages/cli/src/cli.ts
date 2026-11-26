@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import { parseArgs } from "node:util";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { ContinuumMetrics, IntegrityJournal, WorkflowRuntime, verifyEventChain, type AnyWorkflowDefinition, type WorkflowJournal } from "@continuum/core";
+import { ContinuumMetrics, IntegrityJournal, WorkflowRuntime, nextCronOccurrence, parseCron, verifyEventChain, type AnyWorkflowDefinition, type WorkflowJournal } from "@continuum/core";
 import { PostgresJournal } from "@continuum/postgres";
 import { SqliteJournal } from "@continuum/sqlite";
 import { formatRunSummary, formatStepTable, json, parseWorkflowSelector, table } from "./format.js";
@@ -23,6 +23,7 @@ Usage:
   continuum leases [--db file] [--postgres url]
   continuum export [--db file] [--out file]
   continuum verify [--db file] [--postgres url]
+  continuum next "<cron>" [count]
 
 Examples:
   continuum start checkout@1 --workflows ./dist/workflows.js --input '{"orderId":"ord_1"}' --wait
@@ -64,6 +65,34 @@ async function main(argv: string[]): Promise<number> {
   const leaseTtl = values["lease-ttl"] ?? values.leaseTtl;
   const metricsPort = values["metrics-port"] ?? values.metricsPort;
   const maxConcurrentSteps = values["max-concurrent-steps"] ?? values.maxConcurrentSteps;
+
+  // `next` is pure cron lookahead and needs no journal, so handle it before
+  // opening a database to avoid creating one as a side effect.
+  if (command === "next") {
+    const expression = positionals[0];
+    if (!expression) throw new Error("next requires a cron expression");
+    const count = positionals[1] ? Number(positionals[1]) : 5;
+    if (!Number.isInteger(count) || count < 1) throw new Error("count must be a positive integer");
+    const spec = parseCron(expression);
+    const times: number[] = [];
+    let cursor = Date.now();
+    let inclusive = false;
+    for (let i = 0; i < count; i += 1) {
+      const found = nextCronOccurrence(spec, cursor, inclusive);
+      if (Number.isNaN(found)) break;
+      times.push(found);
+      cursor = found;
+      inclusive = false;
+    }
+    if (times.length === 0) {
+      console.log("No future occurrence found.");
+      return 0;
+    }
+    console.log(`Next ${times.length} occurrence(s) of "${expression}" (UTC):`);
+    for (const time of times) console.log(`  ${new Date(time).toISOString()}`);
+    return 0;
+  }
+
   const journal = createJournal(values.postgres ? String(values.postgres) : undefined, resolve(String(values.db)));
   const runtime = new WorkflowRuntime({
     journal,
