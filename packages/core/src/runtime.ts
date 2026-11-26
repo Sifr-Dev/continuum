@@ -26,9 +26,24 @@ import { reverseTopologicalOrder, topologicalOrder, validateWorkflow } from "./v
 interface ActiveTask {
   runId: string;
   stepName: string;
-  kind: "step";
+  kind: "step" | "compensation";
   promise: Promise<void>;
   controller: AbortController;
+}
+
+/**
+ * Rejects the abort promise with the reason carried by the signal, so
+ * shutdown can ask in-flight compensation to stop without treating the
+ * interruption as an application failure.
+ */
+function abortRace(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
 }
 
 const DEFAULT_COMPENSATION_RETRY = {
@@ -58,6 +73,7 @@ export class WorkflowRuntime<Context = unknown> {
   private readonly recoveryTimers = new Map<string, NodeJS.Timeout>();
   private readonly pumping = new Set<string>();
   private readonly wakeResolvers = new Map<string, Set<() => void>>();
+  private readonly pendingWrites = new Set<Promise<unknown>>();
   private readonly finishedRuns = new Set<string>();
   private closing = false;
   private reservedStarts = 0;
@@ -394,11 +410,12 @@ export class WorkflowRuntime<Context = unknown> {
   }
 
   /**
-   * Shuts the worker down. In-flight steps first get `graceMs` to finish and
-   * journal their outcomes — a deploy should not turn healthy work into crash
-   * recovery. Once drained (or the grace period expires), remaining tasks are
-   * aborted, run leases are released so other workers can adopt immediately
-   * instead of waiting for lease expiry, and the journal is closed.
+   * Shuts the worker down. In-flight steps *and in-flight compensations* first
+   * get `graceMs` to finish and journal their outcomes — a deploy should not
+   * turn healthy work, or a half-applied rollback, into crash recovery. Once
+   * drained (or the grace period expires), remaining tasks are aborted, run
+   * leases are released so other workers can adopt immediately instead of
+   * waiting for lease expiry, and only then is the journal closed.
    */
   async close(options?: { graceMs?: number }): Promise<void> {
     const graceMs = Math.max(0, options?.graceMs ?? 5_000);
@@ -412,7 +429,14 @@ export class WorkflowRuntime<Context = unknown> {
     for (const timer of this.recoveryTimers.values()) clearTimeout(timer);
     this.recoveryTimers.clear();
     for (const task of this.activeTasks.values()) {
-      task.controller.abort(new RunCancelledError("runtime shutdown"));
+      // A forward step is cancelled; an in-flight compensation is *interrupted*.
+      // Compensation must never be reported as cancelled, because that reads as
+      // "the rollback was not needed" while the external effect may be half undone.
+      task.controller.abort(
+        task.kind === "compensation"
+          ? new StepInterruptedError(task.stepName, "runtime shut down during compensation")
+          : new RunCancelledError("runtime shutdown"),
+      );
     }
     // JavaScript cannot forcefully stop non-cooperative user code, so abandon
     // tasks that ignore the abort after a bounded window instead of hanging
@@ -434,12 +458,38 @@ export class WorkflowRuntime<Context = unknown> {
       for (const runId of this.pumping) this.wake(runId);
       await sleep(10);
     }
+    // An abandoned task may still be resolving its final append. Closing the
+    // journal underneath it would either throw inside user code or silently
+    // drop a durable outcome, so wait (bounded) for in-flight writes to settle.
+    await this.drainWrites(1_000);
     await this.journal.close?.();
+  }
+
+  /**
+   * Waits, bounded, for appends already handed to the journal to settle. New
+   * appends are still accepted: fencing (not this barrier) is what makes late
+   * writes from a superseded worker safe.
+   */
+  private async drainWrites(timeoutMs: number): Promise<void> {
+    if (this.pendingWrites.size === 0) return;
+    await Promise.race([
+      Promise.allSettled([...this.pendingWrites]),
+      sleep(timeoutMs),
+    ]);
   }
 
   private async append(events: readonly NewContinuumEvent[], leaseOverride?: RunLease): Promise<ContinuumEvent[]> {
     const lease = leaseOverride ?? (events.length > 0 ? this.activeLeases.get(events[0]?.runId ?? "") : undefined);
-    const rows = await this.journal.append(events, lease ? { lease } : undefined);
+    // Track durable writes so close() can let an in-flight outcome settle
+    // before the journal itself is closed.
+    const write = this.journal.append(events, lease ? { lease } : undefined);
+    this.pendingWrites.add(write);
+    let rows: ContinuumEvent[];
+    try {
+      rows = await write;
+    } finally {
+      this.pendingWrites.delete(write);
+    }
     for (const event of rows) {
       for (const observer of this.observers) {
         try {
@@ -1106,60 +1156,38 @@ export class WorkflowRuntime<Context = unknown> {
           },
         ]);
 
+        // Compensation runs inline in the pump, but it is registered like a
+        // forward step so a deploy drain covers it: an in-flight rollback must
+        // get the same grace window, and must be journaled as interrupted
+        // rather than left as a dangling `compensating` step under a worker
+        // that has already released its lease.
+        const task: ActiveTask = {
+          runId,
+          stepName,
+          kind: "compensation",
+          controller,
+          promise: Promise.resolve(),
+        };
+        const compensation = this.runCompensationAttempt({
+          runId,
+          workflow,
+          step,
+          stepName,
+          state,
+          current,
+          attempt,
+          controller,
+          startedAt,
+        });
+        task.promise = compensation;
+        this.activeTasks.set(taskKey(runId, `${stepName}#compensate`), task);
+
         try {
-          await this.executeWithTimeout({
-            stepName: `${stepName}.compensate`,
-            timeoutMs: step.compensationTimeoutMs ?? step.timeoutMs,
-            controller,
-            invoke: () => step.compensate?.({
-              input: state.input,
-              output: current.output,
-              outputs: outputsFromState(state),
-              context: this.context,
-              runId,
-              stepName,
-              attempt,
-              ...(current.idempotencyKey !== undefined ? { idempotencyKey: current.idempotencyKey } : {}),
-              signal: controller.signal,
-              now: this.now,
-              emit: async (name, payload = {}) => {
-                await this.append([
-                  {
-                    runId,
-                    workflowName: workflow.name,
-                    type: "custom",
-                    data: { name, payload, step: stepName, compensation: true },
-                  },
-                ]);
-              },
-            }),
-          });
-          await this.append([
-            {
-              runId,
-              workflowName: workflow.name,
-              type: "compensation.step_completed",
-              data: { step: stepName, attempt, durationMs: this.now() - startedAt },
-            },
-          ]);
+          await compensation;
         } catch (error) {
-          const policy = resolveRetryPolicy(step.compensationRetry, DEFAULT_COMPENSATION_RETRY);
-          const decision = retryDecision(policy, attempt, this.now(), this.random);
-          await this.append([
-            {
-              runId,
-              workflowName: workflow.name,
-              type: "compensation.step_failed",
-              data: {
-                step: stepName,
-                attempt,
-                error: serializeError(error),
-                retryable: decision.retryable,
-                ...(decision.nextAttemptAt !== undefined ? { nextAttemptAt: decision.nextAttemptAt } : {}),
-                durationMs: this.now() - startedAt,
-              },
-            },
-          ]);
+          // runCompensationAttempt journals its own failure; this only keeps the
+          // pump's control flow identical to the pre-existing retry loop.
+          void error;
         }
       }
     }
@@ -1205,6 +1233,106 @@ export class WorkflowRuntime<Context = unknown> {
             },
           },
     ]);
+  }
+
+  /**
+   * Executes one compensation attempt and journals its outcome. Unlike a
+   * forward step this never treats an aborted signal as success: if the signal
+   * fired, the attempt is journaled as `compensation.step_interrupted`, which
+   * keeps the step retryable instead of silently completing a rollback that may
+   * not have finished.
+   */
+  private async runCompensationAttempt(args: {
+    runId: string;
+    workflow: AnyWorkflowDefinition;
+    step: AnyStepDefinition;
+    stepName: string;
+    state: RunState;
+    current: StepState;
+    attempt: number;
+    controller: AbortController;
+    startedAt: number;
+  }): Promise<void> {
+    const { runId, workflow, step, stepName, state, current, attempt, controller, startedAt } = args;
+    const key = taskKey(runId, `${stepName}#compensate`);
+    try {
+      const work = Promise.resolve().then(() => step.compensate?.({
+        input: state.input,
+        output: current.output,
+        outputs: outputsFromState(state),
+        context: this.context,
+        runId,
+        stepName,
+        attempt,
+        ...(current.idempotencyKey !== undefined ? { idempotencyKey: current.idempotencyKey } : {}),
+        signal: controller.signal,
+        now: this.now,
+        emit: async (name, payload = {}) => {
+          await this.append([
+            {
+              runId,
+              workflowName: workflow.name,
+              type: "custom",
+              data: { name, payload, step: stepName, compensation: true },
+            },
+          ]);
+        },
+      }));
+
+      await this.executeWithTimeout({
+        stepName: `${stepName}.compensate`,
+        timeoutMs: step.compensationTimeoutMs ?? step.timeoutMs,
+        controller,
+        // Racing the abort signal is what lets shutdown stop waiting for a
+        // non-cooperative compensation once the grace window is spent.
+        invoke: () => Promise.race([work, abortRace(controller.signal)]),
+      });
+
+      if (controller.signal.aborted) {
+        // The abort won the race but the user function may still have resolved
+        // afterwards. Never record completion for a signal that has fired.
+        throw controller.signal.reason;
+      }
+
+      await this.append([
+        {
+          runId,
+          workflowName: workflow.name,
+          type: "compensation.step_completed",
+          data: { step: stepName, attempt, durationMs: this.now() - startedAt },
+        },
+      ]);
+    } catch (error) {
+      const interrupted = controller.signal.aborted;
+      const policy = resolveRetryPolicy(step.compensationRetry, DEFAULT_COMPENSATION_RETRY);
+      const decision = interrupted
+        ? { retryable: true as const, nextAttemptAt: this.now() + retryDelayMs(policy, attempt, this.random) }
+        : retryDecision(policy, attempt, this.now(), this.random);
+      try {
+        await this.append([
+          {
+            runId,
+            workflowName: workflow.name,
+            type: interrupted ? "compensation.step_interrupted" : "compensation.step_failed",
+            data: {
+              step: stepName,
+              attempt,
+              error: serializeError(error),
+              retryable: decision.retryable,
+              ...(decision.nextAttemptAt !== undefined ? { nextAttemptAt: decision.nextAttemptAt } : {}),
+              durationMs: this.now() - startedAt,
+            },
+          },
+        ]);
+      } catch {
+        // The lease may already be released (shutdown) or the journal closed on
+        // a fully drained worker. The surviving compensation.step_started record
+        // is what recovery uses to retry the rollback.
+      }
+    } finally {
+      this.activeTasks.delete(key);
+      this.wake(runId);
+    }
   }
 
   private async finishCompensationFailure(
