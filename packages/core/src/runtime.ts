@@ -591,6 +591,11 @@ export class WorkflowRuntime<Context = unknown> {
             await Promise.race([Promise.race(active.map((task) => task.promise)), this.waitForWake(runId, 100)]);
             continue;
           }
+          // A closing worker must not open a new rollback attempt: it would race
+          // the grace window it was just denied and could apply an external
+          // effect with no worker left to record it. The durable
+          // compensation_pending state is what the next worker adopts instead.
+          if (this.closing) return;
           await this.compensateAndFinish(runId, definition, state);
           continue;
         }
@@ -1143,6 +1148,11 @@ export class WorkflowRuntime<Context = unknown> {
         }
 
         if (!["succeeded", "compensation_pending"].includes(current.status)) break;
+
+        // Never open a retry attempt while shutting down. The interrupted
+        // attempt is already journaled as retryable, so returning here leaves
+        // the run durably resumable instead of racing the grace window.
+        if (this.closing) return;
 
         const attempt = current.compensationAttempts + 1;
         const controller = new AbortController();
