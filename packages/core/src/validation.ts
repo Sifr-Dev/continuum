@@ -1,4 +1,5 @@
 import { WorkflowValidationError } from "./errors.js";
+import { parseCron } from "./cron.js";
 import type { AnyStepDefinition, AnyWorkflowDefinition } from "./types.js";
 
 export function validateWorkflow(definition: AnyWorkflowDefinition): string[] {
@@ -12,10 +13,29 @@ export function validateWorkflow(definition: AnyWorkflowDefinition): string[] {
     throw new WorkflowValidationError("Workflow must contain at least one step", { workflow: definition.name });
   }
   if (definition.schedule) {
-    if (!Number.isFinite(definition.schedule.intervalMs) || definition.schedule.intervalMs < 1_000) {
+    const schedule = definition.schedule;
+    const hasCron = schedule.cron !== undefined;
+    const hasInterval = schedule.intervalMs !== undefined;
+    if (hasCron && hasInterval) {
+      throw new WorkflowValidationError("Workflow schedule must set either cron or intervalMs, not both", { workflow: definition.name });
+    }
+    if (!hasCron && !hasInterval) {
+      throw new WorkflowValidationError("Workflow schedule must set either cron or intervalMs", { workflow: definition.name });
+    }
+    if (hasInterval && (!Number.isFinite(schedule.intervalMs) || (schedule.intervalMs as number) < 1_000)) {
       throw new WorkflowValidationError("Workflow schedule intervalMs must be at least 1000", { workflow: definition.name });
     }
-    if (definition.schedule.catchupWindows !== undefined && (!Number.isInteger(definition.schedule.catchupWindows) || definition.schedule.catchupWindows < 0)) {
+    if (hasCron) {
+      try {
+        parseCron(schedule.cron as string);
+      } catch (error) {
+        throw new WorkflowValidationError(
+          error instanceof Error ? error.message : String(error),
+          { workflow: definition.name },
+        );
+      }
+    }
+    if (schedule.catchupWindows !== undefined && (!Number.isInteger(schedule.catchupWindows) || schedule.catchupWindows < 0)) {
       throw new WorkflowValidationError("Workflow schedule catchupWindows must be a non-negative integer", { workflow: definition.name });
     }
   }

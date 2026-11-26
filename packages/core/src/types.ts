@@ -106,8 +106,18 @@ export type StepOutputs<Steps extends readonly AnyStepDefinition[]> = {
 };
 
 export interface WorkflowSchedule<Input = unknown> {
-  /** Fixed production interval. Deterministic window run ids make distributed scheduling safe. */
-  intervalMs: number;
+  /**
+   * Fixed production interval in milliseconds. Deterministic window run ids
+   * make distributed scheduling safe. Mutually exclusive with `cron`; one of
+   * the two must be provided.
+   */
+  intervalMs?: number;
+  /**
+   * Standard 5-field cron expression (minute hour day-of-month month
+   * day-of-week), evaluated in UTC. When set, it takes precedence over
+   * `intervalMs` and produces one deterministic window per cron occurrence.
+   */
+  cron?: string;
   input: Input;
   /** Number of missed preceding windows to backfill when a worker starts. Defaults to 0. */
   catchupWindows?: number;

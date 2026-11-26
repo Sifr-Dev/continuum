@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { resolveRetryPolicy, retryDecision, retryDelayMs } from "./backoff.js";
+import { parseCron, previousCronOccurrence, type CronSpec } from "./cron.js";
 import { RunAlreadyExistsError, RunCancelledError, StepInterruptedError, StepTimeoutError, serializeError } from "./errors.js";
 import { projectRun, summarizeRun } from "./projection.js";
 import type {
@@ -49,6 +50,7 @@ export class WorkflowRuntime<Context = unknown> {
   private readonly workerId: string;
   private readonly leaseTtlMs: number;
   private readonly definitions = new Map<string, AnyWorkflowDefinition>();
+  private readonly cronCache = new Map<string, CronSpec>();
   private readonly orderedSteps = new Map<string, string[]>();
   private readonly reverseOrderedSteps = new Map<string, string[]>();
   private readonly activeTasks = new Map<string, ActiveTask>();
@@ -233,10 +235,11 @@ export class WorkflowRuntime<Context = unknown> {
     for (const definition of definitions) {
       const schedule = definition.schedule;
       if (!schedule) continue;
-      const currentWindow = Math.floor(now / schedule.intervalMs) * schedule.intervalMs;
       const catchupWindows = schedule.catchupWindows ?? 0;
-      for (let offset = catchupWindows; offset >= 0; offset -= 1) {
-        const windowStart = currentWindow - offset * schedule.intervalMs;
+      const windows = schedule.cron
+        ? this.cronWindows(schedule.cron, now, catchupWindows)
+        : intervalWindows(now, schedule.intervalMs as number, catchupWindows);
+      for (const windowStart of windows) {
         if (windowStart < 0) continue;
         const runId = `scheduled:${definition.name}:${definition.version}:${windowStart}`;
         try {
@@ -255,6 +258,26 @@ export class WorkflowRuntime<Context = unknown> {
       }
     }
     return started;
+  }
+
+  /** Deterministic, newest-first schedule window starts for a cron expression. */
+  private cronWindows(expression: string, now: number, catchupWindows: number): number[] {
+    let spec = this.cronCache.get(expression);
+    if (!spec) {
+      spec = parseCron(expression);
+      this.cronCache.set(expression, spec);
+    }
+    const windows: number[] = [];
+    let cursor = now;
+    let inclusive = true;
+    for (let offset = 0; offset <= catchupWindows; offset += 1) {
+      const found = previousCronOccurrence(spec, cursor, inclusive);
+      if (Number.isNaN(found)) break;
+      windows.push(found);
+      cursor = found;
+      inclusive = false;
+    }
+    return windows;
   }
 
   async signalRun(runId: string, signalName: string, payload: unknown = null): Promise<void> {
@@ -1262,6 +1285,16 @@ function stepReadyAt(step: AnyStepDefinition, state: RunState, stepState: StepSt
 
 function isDuplicateRunError(error: unknown, runId: string): boolean {
   return error instanceof RunAlreadyExistsError && error.details?.runId === runId;
+}
+
+/** Deterministic, newest-first fixed-interval window starts. */
+function intervalWindows(now: number, intervalMs: number, catchupWindows: number): number[] {
+  const currentWindow = Math.floor(now / intervalMs) * intervalMs;
+  const windows: number[] = [];
+  for (let offset = 0; offset <= catchupWindows; offset += 1) {
+    windows.push(currentWindow - offset * intervalMs);
+  }
+  return windows;
 }
 
 function outputsFromState(state: RunState): Record<string, unknown> {
