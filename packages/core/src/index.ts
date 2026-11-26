@@ -6,6 +6,7 @@ export type { CronSpec } from "./cron.js";
 export { IntegrityJournal, verifyEventChain, stableStringify, stripIntegrity } from "./integrity.js";
 export type { IntegrityLink, IntegrityReport, IntegrityJournalOptions } from "./integrity.js";
 export { projectRun, projectSummaries, summarizeRun } from "./projection.js";
+export type { ProjectRunOptions } from "./projection.js";
 export { retryDecision, retryDelayMs, resolveRetryPolicy } from "./backoff.js";
 export { topologicalOrder, validateWorkflow } from "./validation.js";
 export {
@@ -33,6 +34,7 @@ export type {
   ResolvedRetryPolicy,
   RetryPolicy,
   RunLease,
+  RunSnapshot,
   RunState,
   RunStatus,
   RunSummary,

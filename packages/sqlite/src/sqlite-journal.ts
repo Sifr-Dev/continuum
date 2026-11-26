@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { RunAlreadyExistsError, WorkerLeaseLostError } from "@continuum/core";
-import type { AppendEventOptions, ContinuumEvent, ContinuumEventType, NewContinuumEvent, RunLease, WorkflowJournal } from "@continuum/core";
+import type { AppendEventOptions, ContinuumEvent, ContinuumEventType, NewContinuumEvent, RunLease, RunSnapshot, RunState, WorkflowJournal } from "@continuum/core";
 
 export interface SqliteJournalOptions {
   filename: string;
@@ -131,6 +131,16 @@ export class SqliteJournal implements WorkflowJournal {
     return rows.map(rowToEvent);
   }
 
+  async eventsAfter(runId: string, afterSeq: number): Promise<ContinuumEvent[]> {
+    const rows = this.db.prepare(`
+      SELECT seq, event_id, run_id, workflow_name, type, at, data
+      FROM continuum_events
+      WHERE run_id = ? AND seq > ?
+      ORDER BY seq ASC
+    `).all(runId, afterSeq) as unknown as EventRow[];
+    return rows.map(rowToEvent);
+  }
+
   async runIds(): Promise<string[]> {
     const rows = this.db.prepare(`
       SELECT run_id
@@ -139,6 +149,29 @@ export class SqliteJournal implements WorkflowJournal {
       ORDER BY MIN(seq) ASC
     `).all() as unknown as Array<{ run_id: string }>;
     return rows.map((row) => row.run_id);
+  }
+
+  async saveRunSnapshot(snapshot: RunSnapshot): Promise<void> {
+    this.db.prepare(`
+      INSERT INTO continuum_snapshots (run_id, last_seq, state)
+      VALUES (?, ?, ?)
+      ON CONFLICT(run_id) DO UPDATE SET
+        last_seq = excluded.last_seq,
+        state = excluded.state
+      WHERE excluded.last_seq >= continuum_snapshots.last_seq
+    `).run(snapshot.runId, snapshot.lastSeq, JSON.stringify(snapshot.state));
+  }
+
+  async latestRunSnapshot(runId: string): Promise<RunSnapshot | undefined> {
+    const row = this.db.prepare(`
+      SELECT run_id, last_seq, state FROM continuum_snapshots WHERE run_id = ?
+    `).get(runId) as { run_id: string; last_seq: number; state: string } | undefined;
+    if (!row) return undefined;
+    return {
+      runId: row.run_id,
+      lastSeq: row.last_seq,
+      state: JSON.parse(row.state) as RunState,
+    };
   }
 
   async acquireRunLease(runId: string, workerId: string, ttlMs: number): Promise<RunLease | undefined> {
@@ -237,6 +270,12 @@ export class SqliteJournal implements WorkflowJournal {
 
       CREATE INDEX IF NOT EXISTS idx_continuum_leases_expiry
         ON continuum_leases (expires_at);
+
+      CREATE TABLE IF NOT EXISTS continuum_snapshots (
+        run_id TEXT PRIMARY KEY,
+        last_seq INTEGER NOT NULL,
+        state TEXT NOT NULL CHECK (json_valid(state))
+      );
 
       INSERT OR IGNORE INTO continuum_runs (run_id, created_at)
       SELECT run_id, MIN(at)

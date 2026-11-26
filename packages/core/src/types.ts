@@ -310,6 +310,20 @@ export interface RunLease {
   expiresAt: number;
 }
 
+/**
+ * A materialized projection of a run at a specific journal position. Storing
+ * a snapshot lets readers resume from `lastSeq` and fold only the newer tail
+ * of events instead of replaying the full history — the key optimization for
+ * long-lived workflows with thousands of events.
+ */
+export interface RunSnapshot {
+  runId: string;
+  /** Highest event seq folded into `state` (inclusive). */
+  lastSeq: number;
+  /** Projected run state as of `lastSeq`. */
+  state: RunState;
+}
+
 export interface AppendEventOptions {
   /** When present, the journal must atomically verify this fencing token while writing. */
   lease?: RunLease;
@@ -318,6 +332,8 @@ export interface AppendEventOptions {
 export interface WorkflowJournal {
   append(events: readonly NewContinuumEvent[], options?: AppendEventOptions): Promise<ContinuumEvent[]>;
   events(runId: string): Promise<ContinuumEvent[]>;
+  /** Read only events with seq greater than `afterSeq` (snapshot tail reads). */
+  eventsAfter?(runId: string, afterSeq: number): Promise<ContinuumEvent[]>;
   allEvents(): Promise<ContinuumEvent[]>;
   runIds(): Promise<string[]>;
   /** Atomically acquire or re-acquire a run worker lease. Implementations must be safe across processes. */
@@ -328,6 +344,10 @@ export interface WorkflowJournal {
   releaseRunLease?(lease: RunLease): Promise<void>;
   /** Operational visibility into current lease ownership. */
   listRunLeases?(): Promise<RunLease[]>;
+  /** Persist a projected run snapshot for faster reads of long-lived runs. */
+  saveRunSnapshot?(snapshot: RunSnapshot): Promise<void>;
+  /** Load the most recent snapshot for a run, if any. */
+  latestRunSnapshot?(runId: string): Promise<RunSnapshot | undefined>;
   close?(): Promise<void> | void;
 }
 
@@ -361,6 +381,12 @@ export interface RuntimeOptions<Context = unknown> {
   workerId?: string;
   /** Lease duration in milliseconds for journals that support distributed workers. Defaults to 10s. */
   leaseTtlMs?: number;
+  /**
+   * When true and the journal supports snapshots, a snapshot is written as
+   * each run reaches a terminal state so later reads fold only the tail.
+   * Defaults to false.
+   */
+  snapshotOnTerminal?: boolean;
 }
 
 export interface WorkflowHandle<Output = unknown> {

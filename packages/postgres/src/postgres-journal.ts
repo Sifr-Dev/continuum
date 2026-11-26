@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
 import { RunAlreadyExistsError, WorkerLeaseLostError } from "@continuum/core";
-import type { AppendEventOptions, ContinuumEvent, ContinuumEventType, NewContinuumEvent, RunLease, WorkflowJournal } from "@continuum/core";
+import type { AppendEventOptions, ContinuumEvent, ContinuumEventType, NewContinuumEvent, RunLease, RunSnapshot, RunState, WorkflowJournal } from "@continuum/core";
 
 export type PostgresJournalOptions = PoolConfig & {
   /** Existing pools are not closed by the journal. */
@@ -117,6 +117,18 @@ export class PostgresJournal implements WorkflowJournal {
     return result.rows.map(rowToEvent);
   }
 
+  async eventsAfter(runId: string, afterSeq: number): Promise<ContinuumEvent[]> {
+    await this.ready;
+    const result = await this.pool.query<EventRow>(
+      `SELECT seq, event_id, run_id, workflow_name, type, at, data
+       FROM continuum_events
+       WHERE run_id = $1 AND seq > $2
+       ORDER BY seq ASC`,
+      [runId, afterSeq],
+    );
+    return result.rows.map(rowToEvent);
+  }
+
   async allEvents(): Promise<ContinuumEvent[]> {
     await this.ready;
     const result = await this.pool.query<EventRow>(
@@ -135,6 +147,29 @@ export class PostgresJournal implements WorkflowJournal {
        ORDER BY created_at ASC, run_id ASC`,
     );
     return result.rows.map((row) => row.run_id);
+  }
+
+  async saveRunSnapshot(snapshot: RunSnapshot): Promise<void> {
+    await this.ready;
+    await this.pool.query(
+      `INSERT INTO continuum_snapshots (run_id, last_seq, state)
+       VALUES ($1, $2, $3::jsonb)
+       ON CONFLICT (run_id) DO UPDATE
+       SET last_seq = EXCLUDED.last_seq, state = EXCLUDED.state
+       WHERE EXCLUDED.last_seq >= continuum_snapshots.last_seq`,
+      [snapshot.runId, snapshot.lastSeq, JSON.stringify(snapshot.state)],
+    );
+  }
+
+  async latestRunSnapshot(runId: string): Promise<RunSnapshot | undefined> {
+    await this.ready;
+    const result = await this.pool.query<{ run_id: string; last_seq: string | number; state: RunState }>(
+      `SELECT run_id, last_seq, state FROM continuum_snapshots WHERE run_id = $1`,
+      [runId],
+    );
+    const row = result.rows[0];
+    if (!row) return undefined;
+    return { runId: row.run_id, lastSeq: Number(row.last_seq), state: row.state };
   }
 
   async acquireRunLease(runId: string, workerId: string, ttlMs: number): Promise<RunLease | undefined> {
@@ -235,6 +270,12 @@ export class PostgresJournal implements WorkflowJournal {
 
         CREATE INDEX IF NOT EXISTS idx_continuum_leases_expiry
           ON continuum_leases (expires_at);
+
+        CREATE TABLE IF NOT EXISTS continuum_snapshots (
+          run_id TEXT PRIMARY KEY,
+          last_seq BIGINT NOT NULL,
+          state JSONB NOT NULL
+        );
       `);
     } finally {
       await client.query("SELECT pg_advisory_unlock($1)", [MIGRATION_LOCK_KEY]).catch(() => undefined);

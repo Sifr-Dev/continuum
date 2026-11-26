@@ -10,6 +10,7 @@ import type {
   JsonObject,
   NewContinuumEvent,
   RunLease,
+  RunSnapshot,
   RunState,
   RunSummary,
   RuntimeObserver,
@@ -61,6 +62,7 @@ export class WorkflowRuntime<Context = unknown> {
   private readonly finishedRuns = new Set<string>();
   private closing = false;
   private reservedStarts = 0;
+  private readonly snapshotOnTerminal: boolean;
 
   constructor(options: RuntimeOptions<Context>) {
     this.journal = options.journal;
@@ -72,6 +74,7 @@ export class WorkflowRuntime<Context = unknown> {
     this.observers = options.observers ?? [];
     this.workerId = options.workerId ?? `worker-${randomUUID()}`;
     this.leaseTtlMs = Math.max(250, options.leaseTtlMs ?? 10_000);
+    this.snapshotOnTerminal = options.snapshotOnTerminal ?? false;
   }
 
   getWorkerId(): string {
@@ -332,6 +335,41 @@ export class WorkflowRuntime<Context = unknown> {
 
   async getRun(runId: string): Promise<RunState | undefined> {
     return projectRun(await this.journal.events(runId));
+  }
+
+  /**
+   * Snapshot-aware read: loads only journal events newer than the latest
+   * snapshot and folds that tail onto the materialized state. This keeps both
+   * IO and fold cost proportional to the tail, not the full run history.
+   *
+   * Kept separate from `getRun` so the live scheduling hot path retains its
+   * exact await ordering while readers that want the optimization opt in.
+   */
+  async getRunWithSnapshot(runId: string): Promise<RunState | undefined> {
+    const snapshot = await this.journal.latestRunSnapshot?.(runId);
+    if (snapshot && snapshot.runId === runId && this.journal.eventsAfter) {
+      const tail = await this.journal.eventsAfter(runId, snapshot.lastSeq);
+      if (tail.length === 0) return projectRun([], { base: snapshot });
+      return projectRun(tail, { base: snapshot });
+    }
+    return this.getRun(runId);
+  }
+
+  /**
+   * Materialize and persist a snapshot for a run at its current journal
+   * position. No-op (returns undefined) when the journal does not support
+   * snapshots or the run has no events. Safe to call repeatedly; the latest
+   * snapshot always wins.
+   */
+  async snapshotRun(runId: string): Promise<RunSnapshot | undefined> {
+    if (!this.journal.saveRunSnapshot || !this.journal.latestRunSnapshot) return undefined;
+    const events = await this.journal.events(runId);
+    if (events.length === 0) return undefined;
+    const state = projectRun(events);
+    if (!state) return undefined;
+    const snapshot: RunSnapshot = { runId, lastSeq: events[events.length - 1]!.seq, state };
+    await this.journal.saveRunSnapshot(snapshot);
+    return snapshot;
   }
 
   /**
@@ -1262,6 +1300,13 @@ export class WorkflowRuntime<Context = unknown> {
   private async notifyFinishedOnce(state: RunState): Promise<void> {
     if (this.finishedRuns.has(state.runId)) return;
     this.finishedRuns.add(state.runId);
+    if (this.snapshotOnTerminal && this.journal.saveRunSnapshot && this.journal.latestRunSnapshot) {
+      try {
+        await this.snapshotRun(state.runId);
+      } catch {
+        // Snapshot failures are observability-only and never affect correctness.
+      }
+    }
     for (const observer of this.observers) {
       try {
         await observer.onRunFinished?.(state);

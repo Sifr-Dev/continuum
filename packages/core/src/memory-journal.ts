@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { RunAlreadyExistsError, WorkerLeaseLostError } from "./errors.js";
-import type { AppendEventOptions, ContinuumEvent, NewContinuumEvent, RunLease, WorkflowJournal } from "./types.js";
+import type { AppendEventOptions, ContinuumEvent, NewContinuumEvent, RunLease, RunSnapshot, WorkflowJournal } from "./types.js";
 
 export class MemoryJournal implements WorkflowJournal {
   private readonly rows: ContinuumEvent[] = [];
   private readonly leases = new Map<string, RunLease>();
+  private readonly snapshots = new Map<string, RunSnapshot>();
   private seq = 0;
 
   async append(events: readonly NewContinuumEvent[], options: AppendEventOptions = {}): Promise<ContinuumEvent[]> {
@@ -49,12 +50,31 @@ export class MemoryJournal implements WorkflowJournal {
     return this.rows.filter((event) => event.runId === runId).sort((a, b) => a.seq - b.seq).map(cloneEvent);
   }
 
+  async eventsAfter(runId: string, afterSeq: number): Promise<ContinuumEvent[]> {
+    return this.rows
+      .filter((event) => event.runId === runId && event.seq > afterSeq)
+      .sort((a, b) => a.seq - b.seq)
+      .map(cloneEvent);
+  }
+
   async allEvents(): Promise<ContinuumEvent[]> {
     return [...this.rows].sort((a, b) => a.seq - b.seq).map(cloneEvent);
   }
 
   async runIds(): Promise<string[]> {
     return [...new Set(this.rows.map((event) => event.runId))];
+  }
+
+  async saveRunSnapshot(snapshot: RunSnapshot): Promise<void> {
+    const existing = this.snapshots.get(snapshot.runId);
+    if (!existing || snapshot.lastSeq >= existing.lastSeq) {
+      this.snapshots.set(snapshot.runId, structuredClone(snapshot));
+    }
+  }
+
+  async latestRunSnapshot(runId: string): Promise<RunSnapshot | undefined> {
+    const snapshot = this.snapshots.get(runId);
+    return snapshot ? structuredClone(snapshot) : undefined;
   }
 
   async acquireRunLease(runId: string, workerId: string, ttlMs: number): Promise<RunLease | undefined> {

@@ -1,6 +1,7 @@
 import type {
   ContinuumEvent,
   JsonObject,
+  RunSnapshot,
   RunState,
   RunSummary,
   SerializedError,
@@ -8,10 +9,22 @@ import type {
   StepState,
 } from "./types.js";
 
-export function projectRun(events: readonly ContinuumEvent[]): RunState | undefined {
-  let state: RunState | undefined;
+export interface ProjectRunOptions {
+  /**
+   * Resume from a previously captured snapshot instead of folding from
+   * scratch. Events at or before `base.lastSeq` are skipped, and the snapshot
+   * state is deep-cloned so the caller's snapshot is never mutated.
+   */
+  base?: RunSnapshot;
+}
+
+export function projectRun(events: readonly ContinuumEvent[], options: ProjectRunOptions = {}): RunState | undefined {
+  const base = options.base;
+  let state: RunState | undefined = base ? (structuredClone(base.state) as RunState) : undefined;
+  const skipSeq = base ? base.lastSeq : Number.NEGATIVE_INFINITY;
 
   for (const event of events) {
+    if (event.seq <= skipSeq) continue;
     if (event.type === "run.created") {
       const steps: Record<string, StepState> = {};
       for (const plan of readStepPlans(event.data.steps)) {

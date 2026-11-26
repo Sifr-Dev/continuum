@@ -114,6 +114,9 @@ export class IntegrityJournal implements WorkflowJournal {
     if (inner.renewRunLease) this.renewRunLease = inner.renewRunLease.bind(inner);
     if (inner.releaseRunLease) this.releaseRunLease = inner.releaseRunLease.bind(inner);
     if (inner.listRunLeases) this.listRunLeases = inner.listRunLeases.bind(inner);
+    if (inner.eventsAfter) this.eventsAfter = inner.eventsAfter.bind(inner);
+    if (inner.saveRunSnapshot) this.saveRunSnapshot = inner.saveRunSnapshot.bind(inner);
+    if (inner.latestRunSnapshot) this.latestRunSnapshot = inner.latestRunSnapshot.bind(inner);
     if (inner.close) this.close = inner.close.bind(inner);
   }
 
@@ -184,6 +187,8 @@ export class IntegrityJournal implements WorkflowJournal {
     return this.inner.events(runId);
   }
 
+  eventsAfter?: WorkflowJournal["eventsAfter"];
+
   allEvents(): Promise<ContinuumEvent[]> {
     return this.inner.allEvents();
   }
@@ -196,6 +201,8 @@ export class IntegrityJournal implements WorkflowJournal {
   renewRunLease?: WorkflowJournal["renewRunLease"];
   releaseRunLease?: WorkflowJournal["releaseRunLease"];
   listRunLeases?: WorkflowJournal["listRunLeases"];
+  saveRunSnapshot?: WorkflowJournal["saveRunSnapshot"];
+  latestRunSnapshot?: WorkflowJournal["latestRunSnapshot"];
   close?: WorkflowJournal["close"];
 
   /**

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "bench": "tsx src/run.ts",
+    "bench:snapshots": "tsx src/snapshot-bench.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts"
   },

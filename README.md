@@ -289,6 +289,14 @@ Application steps that perform external effects should use the provided idempote
 
 `IntegrityJournal` decorates any journal (memory, SQLite, Postgres) with a SHA-256 hash chain. Every appended event is stamped with a link that commits to its content and to the previous link, persisted inside the event payload so it survives restarts and needs no adapter changes. `verifyEventChain` (or `journal.verify()`) then proves the history has not been edited, reordered, truncated, or duplicated — any change is reported with the exact broken index. Appends are serialized through the decorator so concurrent writers cannot fork the chain, and a fresh decorator adopts the existing chain state after a restart. This makes tampering *detectable* end to end; it complements, and does not replace, database access controls.
 
+## Snapshots for long-lived runs
+
+`WorkflowRuntime.snapshotRun(runId)` materializes the projected run state at the current journal position and persists it through the journal (`saveRunSnapshot` / `latestRunSnapshot`, implemented by the memory, SQLite, and Postgres adapters, and forwarded by `IntegrityJournal`). `getRunWithSnapshot(runId)` then reads only events newer than the snapshot via `eventsAfter(runId, seq)` and folds that tail onto the materialized state, so read IO and fold cost scale with the tail rather than the full history. Pass `snapshotOnTerminal: true` to write a snapshot automatically when a run finishes.
+
+A benchmark over a 2,001-event run measured **10.4× faster** reads with a snapshot (0.038 ms → 0.004 ms per read) while reading **0 instead of 2,001** events. `getRun` itself is intentionally unchanged: the live scheduling hot path keeps its exact await ordering, and the optimized read is opt-in.
+
+The append-only event history is never truncated — snapshots are additive, so tamper-evident chains and full audit history remain intact.
+
 ## Architecture
 
 At a high level:
@@ -320,7 +328,7 @@ These are explicit design boundaries, not hidden caveats:
 
 - Workflow versioning exists, but automatic migration of in-flight runs across definition versions is not implemented.
 - Worker discovery uses periodic recovery polling rather than database change notifications, adding up to about one second of adoption latency.
-- The journal replays full run history for projection; very long-running workflows need snapshotting.
+- Snapshots are additive: event history is never truncated, so storage still grows with run length even though reads stay cheap.
 - Leases reduce duplicate execution but do not make third-party side effects exactly-once; downstream idempotency is still required.
 - Cron schedules are evaluated in UTC only; per-schedule time zones are not yet supported.
 - The operations console is a demo application, not a packaged multi-tenant production UI.
@@ -329,7 +337,7 @@ These are explicit design boundaries, not hidden caveats:
 ## Roadmap toward category leadership
 
 1. `LISTEN/NOTIFY` or logical-decoding-based wakeups for low-latency distributed scheduling
-2. Snapshots and journal compaction for long-lived workflows
+2. Snapshot pruning/compaction with chain re-anchoring for very large journals
 3. Schedule pause/resume metadata and per-schedule time zones
 4. OpenTelemetry spans and exemplars in addition to Prometheus metrics
 5. Deterministic simulation time and chaos-test harness
