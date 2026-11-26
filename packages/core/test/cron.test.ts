@@ -6,6 +6,7 @@ import {
   WorkflowValidationError,
   defineStep,
   defineWorkflow,
+  nextCronOccurrence,
   parseCron,
   previousCronOccurrence,
   recentCronOccurrences,
@@ -214,4 +215,27 @@ test("cron windows are stable across a one-minute drift", () => {
   assert.equal(a, utc("2026-11-26T12:00:00Z"));
   assert.equal(b, utc("2026-11-26T12:15:00Z"));
   assert.ok(b - a === 15 * MINUTE);
+});
+
+test("nextCronOccurrence returns the next strictly-future firing", () => {
+  const spec = parseCron("0 0 * * *");
+  const now = utc("2026-11-26T12:00:00Z");
+  assert.equal(nextCronOccurrence(spec, now), utc("2026-11-27T00:00:00Z"));
+  // inclusive includes a firing exactly on the boundary.
+  assert.equal(nextCronOccurrence(spec, utc("2026-11-26T00:00:00Z"), true), utc("2026-11-26T00:00:00Z"));
+});
+
+test("nextCronOccurrence crosses month and year boundaries", () => {
+  const spec = parseCron("0 0 1 1 *"); // 00:00 on Jan 1
+  assert.equal(nextCronOccurrence(spec, utc("2026-11-26T12:00:00Z")), utc("2027-01-01T00:00:00Z"));
+});
+
+test("next and previous occurrences bracket the current time for a daily job", () => {
+  const spec = parseCron("0 9 * * *");
+  const now = utc("2026-11-26T12:00:00Z");
+  const prev = previousCronOccurrence(spec, now);
+  const next = nextCronOccurrence(spec, now);
+  assert.equal(prev, utc("2026-11-26T09:00:00Z"));
+  assert.equal(next, utc("2026-11-27T09:00:00Z"));
+  assert.ok(prev < now && now < next);
 });

@@ -209,3 +209,47 @@ export function recentCronOccurrences(spec: CronSpec, nowMs: number, count: numb
 
 /** Milliseconds in a day, exported for callers reasoning about window spacing. */
 export const CRON_DAY_MS = DAY_MS;
+
+/**
+ * Return the epoch-ms timestamp of the next cron occurrence strictly after
+ * `nowMs`, or at/after it when `inclusive` is true. Returns `NaN` when no
+ * occurrence exists before the year 2100. Mirrors
+ * {@link previousCronOccurrence} by advancing whole non-matching
+ * months/days/hours/minutes.
+ */
+export function nextCronOccurrence(spec: CronSpec, nowMs: number, inclusive = false): number {
+  const base = Math.floor(nowMs / MINUTE) * MINUTE;
+  const date = new Date(inclusive ? base : base + MINUTE);
+  date.setUTCSeconds(0, 0);
+
+  for (let guard = 0; guard < 1_000_000; guard += 1) {
+    if (date.getUTCFullYear() > 2100) return Number.NaN;
+
+    if (!spec.months[date.getUTCMonth()]) {
+      date.setUTCDate(1);
+      date.setUTCHours(0, 0, 0, 0);
+      date.setUTCMonth(date.getUTCMonth() + 1);
+      continue;
+    }
+
+    if (!dayMatches(spec, date)) {
+      date.setUTCDate(date.getUTCDate() + 1);
+      date.setUTCHours(0, 0, 0, 0);
+      continue;
+    }
+
+    if (!spec.hours[date.getUTCHours()]) {
+      date.setUTCHours(date.getUTCHours() + 1, 0, 0, 0);
+      continue;
+    }
+
+    if (!spec.minutes[date.getUTCMinutes()]) {
+      date.setUTCMinutes(date.getUTCMinutes() + 1, 0, 0);
+      continue;
+    }
+
+    return date.getTime();
+  }
+
+  return Number.NaN;
+}
