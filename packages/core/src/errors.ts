@@ -48,6 +48,32 @@ export class WorkerLeaseLostError extends ContinuumError {
   }
 }
 
+export class JournalUnavailableError extends ContinuumError {
+  constructor(message = "The workflow journal is temporarily unavailable", options?: { cause?: unknown }) {
+    super(message, "JOURNAL_UNAVAILABLE");
+    this.name = new.target.name;
+    if (options && "cause" in options) this.cause = options.cause;
+  }
+}
+
+/**
+ * A workflow effect and its durable outcome are separate operations. Journal
+ * errors must never consume the step's application retry budget or masquerade
+ * as a failed refund. The journal's next append/recovery attempt remains the
+ * durable source of truth; exact-once external effects still require the
+ * workflow's idempotency key at the remote service.
+ */
+export function isJournalError(error: unknown): boolean {
+  if (error instanceof ContinuumError) return true;
+  if (typeof error !== "object" || error === null) return false;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && (
+    code.startsWith("SQLITE_") ||
+    code.startsWith("PG") ||
+    /^(57P|58P|533|080|ECONN|ETIMEDOUT)/.test(code)
+  );
+}
+
 export class CompensationError extends ContinuumError {
   constructor(stepName: string, causeMessage: string) {
     super(`Compensation for step "${stepName}" failed: ${causeMessage}`, "COMPENSATION_FAILED", {
