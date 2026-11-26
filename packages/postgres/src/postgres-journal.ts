@@ -27,6 +27,13 @@ interface LeaseRow {
 
 const MIGRATION_LOCK_KEY = 84192743;
 
+/**
+ * Milliseconds since the Unix epoch according to the database, not the worker's
+ * wall clock. Lease expiry is evaluated against this value so that clock skew
+ * between worker hosts cannot extend or steal lease ownership.
+ */
+const DATABASE_NOW_MS = "(extract(epoch from statement_timestamp()) * 1000)::bigint";
+
 export class PostgresJournal implements WorkflowJournal {
   private readonly pool: Pool;
   private readonly ownsPool: boolean;
@@ -174,17 +181,19 @@ export class PostgresJournal implements WorkflowJournal {
 
   async acquireRunLease(runId: string, workerId: string, ttlMs: number): Promise<RunLease | undefined> {
     await this.ready;
-    const now = Date.now();
+    // Lease expiry is evaluated against the database clock on both sides of the
+    // comparison. Using each worker's own clock would let a host with a fast
+    // clock steal a live lease, and a slow host would keep an expired one alive.
     const result = await this.pool.query<LeaseRow>(
       `INSERT INTO continuum_leases (run_id, worker_id, fencing_token, expires_at)
-       VALUES ($1, $2, 1, $3)
+       VALUES ($1, $2, 1, ${DATABASE_NOW_MS} + $3::bigint)
        ON CONFLICT (run_id) DO UPDATE
        SET worker_id = EXCLUDED.worker_id,
            fencing_token = continuum_leases.fencing_token + 1,
-           expires_at = EXCLUDED.expires_at
-       WHERE continuum_leases.expires_at <= $4
+           expires_at = ${DATABASE_NOW_MS} + $3::bigint
+       WHERE continuum_leases.expires_at <= ${DATABASE_NOW_MS}
        RETURNING run_id, worker_id, fencing_token, expires_at`,
-      [runId, workerId, now + ttlMs, now],
+      [runId, workerId, ttlMs],
     );
     const row = result.rows[0];
     return row ? rowToLease(row) : undefined;
@@ -194,9 +203,9 @@ export class PostgresJournal implements WorkflowJournal {
     await this.ready;
     const result = await this.pool.query(
       `UPDATE continuum_leases
-       SET expires_at = $4
+       SET expires_at = ${DATABASE_NOW_MS} + $4::bigint
        WHERE run_id = $1 AND worker_id = $2 AND fencing_token = $3`,
-      [lease.runId, lease.workerId, lease.fencingToken, Date.now() + ttlMs],
+      [lease.runId, lease.workerId, lease.fencingToken, ttlMs],
     );
     return result.rowCount === 1;
   }
