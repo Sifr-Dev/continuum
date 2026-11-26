@@ -149,13 +149,13 @@ Because eligibility and outputs are journal projections rather than in-memory wo
 
 ### Distributed schedules
 
-A workflow may declare a fixed `schedule.intervalMs` and static input. Workers compute deterministic window IDs such as:
+A workflow may declare either a fixed `schedule.intervalMs` or a standard 5-field `schedule.cron` expression (evaluated in UTC) plus static input. Workers compute deterministic window IDs such as:
 
 ```text
 scheduled:<workflow>:<version>:<window-start-ms>
 ```
 
-All workers may attempt the same window; transactional run uniqueness ensures only one run exists. `catchupWindows` optionally backfills a bounded number of missed windows.
+For interval schedules the window start is the interval boundary; for cron schedules it is the most recent cron occurrence at or before the tick. All workers may attempt the same window; transactional run uniqueness ensures only one run exists. `catchupWindows` optionally backfills a bounded number of missed windows. Because cron math is UTC and deterministic, every worker derives identical boundaries regardless of host timezone.
 
 ## Distributed worker ownership
 

@@ -124,7 +124,7 @@ A signal is durable before the workflow reacts to it. Re-sending the same signal
 
 ### Scheduled workflows
 
-Workflows may declare fixed-interval schedules in code. Workers create deterministic window run IDs, so multiple workers can race safely and transactional uniqueness prevents duplicates. Use bounded `catchupWindows` when a deployment should backfill recent missed windows after downtime.
+Workflows may declare fixed-interval (`intervalMs`) or cron (`cron`, standard 5-field, UTC) schedules in code. Workers create deterministic window run IDs, so multiple workers can race safely and transactional uniqueness prevents duplicates. Use bounded `catchupWindows` when a deployment should backfill recent missed windows after downtime.
 
 ### Export an audit trail
 

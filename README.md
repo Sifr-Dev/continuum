@@ -62,7 +62,7 @@ The framework records an append-only journal before, during, and after execution
 - **External signals** with durable JSON payloads for human approval and asynchronous callbacks
 - **Conditional human-in-the-loop steps** built from signals and `when` gates
 - **Child workflows** with deterministic child run IDs and automatic reattachment after parent retries
-- **Distributed interval schedules** with deterministic window run IDs and optional catch-up windows
+- **Distributed schedules** — fixed-interval or full 5-field cron expressions (UTC), with deterministic window run IDs and optional catch-up windows
 - **Deferred runs** so API processes can enqueue work and separate workers can execute it
 
 ### Distributed runtime and persistence
@@ -318,7 +318,7 @@ These are explicit design boundaries, not hidden caveats:
 - Worker discovery uses periodic recovery polling rather than database change notifications, adding up to about one second of adoption latency.
 - The journal replays full run history for projection; very long-running workflows need snapshotting.
 - Leases reduce duplicate execution but do not make third-party side effects exactly-once; downstream idempotency is still required.
-- Scheduled workflows use fixed intervals, not full cron expressions.
+- Cron schedules are evaluated in UTC only; per-schedule time zones are not yet supported.
 - The operations console is a demo application, not a packaged multi-tenant production UI.
 - The prototype has integration coverage but not yet large-scale soak, fault-injection, or performance benchmarks.
 
@@ -326,7 +326,7 @@ These are explicit design boundaries, not hidden caveats:
 
 1. `LISTEN/NOTIFY` or logical-decoding-based wakeups for low-latency distributed scheduling
 2. Snapshots and journal compaction for long-lived workflows
-3. Full cron expressions and schedule pause/resume metadata
+3. Schedule pause/resume metadata and per-schedule time zones
 4. OpenTelemetry spans and exemplars in addition to Prometheus metrics
 5. Deterministic simulation time and chaos-test harness
 6. Packaged embeddable operations dashboard with authentication
