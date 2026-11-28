@@ -185,7 +185,6 @@ a synthetic DAG. These are regression baselines, not universal ceilings.
   supported.
 - The operations console is a demo application, not a multi-tenant product UI.
 - No large-scale soak, fault-injection matrix or backpressure benchmark yet.
-- No licence file is present in this repository, so no reuse licence is granted.
 
 ## Roadmap (NOT IMPLEMENTED)
 
@@ -199,3 +198,7 @@ a synthetic DAG. These are regression baselines, not universal ceilings.
 - Kubernetes, Terraform and managed-PostgreSQL deployment templates.
 - Batch journal writes and backpressure controls.
 - Migration tooling for workflow definition evolution.
+
+## License
+
+No licence file is present in this repository, so no reuse licence is granted.
