@@ -2,7 +2,7 @@
   "name": "continuum",
   "version": "0.1.0",
   "private": true,
-  "description": "TypeScript durable execution framework for resilient application workflows",
+  "description": "Aion: TypeScript durable execution framework for resilient application workflows",
   "type": "module",
   "workspaces": [
     "packages/*",

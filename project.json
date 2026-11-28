@@ -1,6 +1,9 @@
 {
-  "name": "continuum",
-  "description": "Durable-execution framework",
+  "name": "Aion",
+  "displayName": "Aion",
+  "repo": "continuum",
+  "description": "Durable execution framework for multi-step application workflows",
+  "summary": "TypeScript runtime with append-only journals, retries, sagas, signals, timers, schedules, child workflows, distributed leases and fenced writes over SQLite or PostgreSQL.",
   "stack": [
     "npm"
   ],

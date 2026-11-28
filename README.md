@@ -1,359 +1,201 @@
-# Continuum
+# Aion
 
-**Continuum is a TypeScript durable execution framework for multi-step application workflows that must survive crashes, flaky dependencies, retries, deployment restarts, cancellation, and partial failure without corrupting business state.**
+**Durable execution for multi-step TypeScript workflows that must survive crashes, retries and partial failure.**
 
-It targets a problem engineers usually solve with scattered glue code: a checkout, provisioning flow, deployment pipeline, migration, or onboarding sequence performs several external effects, then a process crashes or a dependency fails halfway through. Retrying the whole operation duplicates charges, emails, inventory reservations, or infrastructure mutations. Not retrying leaves the system half-finished. Continuum makes execution itself durable and gives every step a recovery, retry, idempotency, timeout, cancellation, and compensation model.
+[![TypeScript](https://img.shields.io/badge/TYPESCRIPT-3178c6?style=for-the-badge&logo=typescript&logoColor=white&labelColor=1b1f27)](https://www.typescriptlang.org/)
+[![Node](https://img.shields.io/badge/NODE-22%20%7C%2026-5fa04e?style=for-the-badge&logo=nodedotjs&logoColor=white&labelColor=1b1f27)](https://nodejs.org/)
+[![CI](https://github.com/Sifr-Dev/continuum/actions/workflows/ci.yml/badge.svg)](https://github.com/Sifr-Dev/continuum/actions/workflows/ci.yml)
 
-> Status: production-shaped framework prototype. The core runtime, distributed worker leases, fenced event writes, PostgreSQL and SQLite journals, CLI worker, coordination primitives, tests, and operations demo work end-to-end. It still needs hardening at scale before claiming production parity with mature systems such as Temporal.
+> The GitHub repository is still `Sifr-Dev/continuum`; Aion is the product name.
+> The npm packages remain `@continuum/*` and the installed CLI remains
+> `continuum`. Both are unchanged so existing imports and scripts keep working.
 
-## Why this exists
+## What it is
 
-Typical application code has hidden distributed-systems problems:
+Aion is a TypeScript runtime for workflows that perform several external
+effects and must not corrupt business state when a process dies halfway
+through. Every step transition is appended to a durable journal before it is
+treated as true; another worker can replay the journal, skip completed steps,
+retry interrupted ones with the same idempotency key, and run compensations in
+reverse dependency order. It is a production-shaped framework prototype, not a
+claim of parity with mature systems such as Temporal.
 
-```ts
-await reserveInventory(order);
-await chargePayment(order);      // succeeds
-await createShipment(order);     // process crashes here
-// Did payment happen? Should we retry? What do we roll back?
-```
+## Current capabilities
 
-Continuum turns that into an explicit durable workflow:
-
-```ts
-const checkout = defineWorkflow({
-  name: "checkout",
-  version: 1,
-  steps: [
-    validateOrder,
-    fraudScreen,
-    manualReview,
-    reserveInventory,
-    chargePayment,
-    createShipment,
-    sendConfirmation,
-  ],
-});
-
-const runId = await runtime.startWorkflow(checkout, order);
-```
-
-The framework records an append-only journal before, during, and after execution. If a worker dies, another worker rehydrates the run from the journal, skips completed steps, retries interrupted steps with the same idempotency key, and runs compensating actions in reverse dependency order when forward execution cannot complete.
-
-## Feature set
-
-### Durable execution
-
-- **Typed workflow DAGs** with dependency edges and parallel branch execution
-- **Append-only event journal**; run state is derived by replaying immutable events
-- **Crash recovery** for steps interrupted between `step.started` and their outcome event
-- **Retry policies** with fixed/exponential backoff, jitter, maximum delay, and persisted retry times
-- **Per-step timeouts** backed by `AbortSignal`
-- **Stable idempotency keys** propagated to every attempt and compensation
-- **Saga compensation** in reverse topological order
-- **Operator cancellation** with abort propagation and rollback
-- **Conditional branches** through pure step-level `when` gates
-- **Workflow output composition** from typed step outputs
-- **Input validation hooks** and dependency graph validation, including cycle detection
-- **Custom domain events** embedded in the same durable journal
-
-### Coordination primitives
-
-- **Durable timers** that delay step eligibility without occupying worker capacity
-- **External signals** with durable JSON payloads for human approval and asynchronous callbacks
-- **Conditional human-in-the-loop steps** built from signals and `when` gates
-- **Child workflows** with deterministic child run IDs and automatic reattachment after parent retries
-- **Distributed schedules** — fixed-interval or full 5-field cron expressions (UTC), with deterministic window run IDs and optional catch-up windows
-- **Deferred runs** so API processes can enqueue work and separate workers can execute it
-
-### Distributed runtime and persistence
-
-- **PostgreSQL journal** for horizontally scalable multi-worker deployments
-- **SQLite journal** for embedded, local, edge, and single-node deployments
-- **Atomic run creation** that rejects duplicate caller-assigned run IDs transactionally
-- **Distributed worker leases** with monotonically increasing fencing tokens
-- **Fenced event writes** so superseded/zombie workers cannot write execution outcomes after losing ownership
-- **Lease recovery** after worker death using expiration and reacquisition
-- **In-memory journal** for fast deterministic tests
-
-### Operations
-
-- **CLI** for starting, inspecting, signalling, cancelling, exporting, recovering, scheduling, and serving workflows
-- **Prometheus-compatible worker metrics endpoint** plus health and run JSON endpoints
-- **Interactive operations console** showing run status, DAG progress, manual approvals, event history, retries, rollback, inventory, and external effect logs
-- **Observer hooks** for metrics, tracing, log shipping, or custom audit pipelines
-- **Node test-runner coverage** for distributed leases, fenced writes, retries, crash recovery, cancellation, signals, timers, schedules, child workflows, compensation, validation, and persistence
-
-## Repository layout
-
-```text
-packages/core          workflow model, runtime, reducer, retry engine, memory journal
-packages/sqlite        embedded durable SQLite journal adapter
-packages/postgres      distributed PostgreSQL journal adapter with leases/fencing
-packages/cli           operations CLI (`continuum`)
-examples/order-system  realistic checkout demo and operations console
-docs                   architecture and operational semantics
-```
+- **Typed workflow DAGs with parallel branches and deterministic planning.**
+  Proof: `packages/core/src/runtime.ts`,
+  `packages/core/test/runtime.test.ts`,
+  `packages/core/test/advanced-runtime.test.ts`.
+- **Append-only journal and replay-derived state**, including recovery for steps
+  interrupted between `step.started` and their outcome.
+  Proof: `packages/core/src/projection.ts`,
+  `packages/sqlite/test/sqlite-journal.test.ts`
+  (`recovers an interrupted run from a reopened SQLite journal`).
+- **Retries with fixed/exponential backoff and jitter, per-step timeouts,
+  cancellation with abort propagation, idempotency keys and saga
+  compensation.**
+  Proof: `packages/core/src/backoff.ts`,
+  `packages/core/test/runtime.test.ts`,
+  `packages/core/test/coordination.test.ts`.
+- **Durable signals, timers, conditional steps, child workflows and cron
+  schedules with deterministic window IDs.**
+  Proof: `packages/core/src/cron.ts`,
+  `packages/core/test/coordination.test.ts`,
+  `packages/core/test/cron.test.ts`.
+- **PostgreSQL journal for multiple workers, with database-backed leases and
+  fencing tokens that reject writes from superseded workers.**
+  Proof: `packages/postgres/src/postgres-journal.ts`,
+  `packages/postgres/test/postgres-journal.test.ts`,
+  `packages/postgres/test/lease-clock.test.ts`.
+- **SQLite journal for embedded and single-node deployments**, including
+  cross-process integrity and duplicate-run rejection.
+  Proof: `packages/sqlite/src/sqlite-journal.ts`,
+  `packages/sqlite/test/sqlite-journal.test.ts`,
+  `packages/sqlite/test/integrity-chain.test.ts`.
+- **Real process-crash proof**: a worker is killed with `SIGKILL` after an
+  external effect but before recording the outcome; an independent process
+  adopts the run and the effect exists exactly once.
+  Proof: `packages/postgres/test/process-crash.test.ts`,
+  `packages/postgres/test/crash-worker.ts`.
+- **SHA-256 tamper-evident history** over any journal, with verification that
+  reports the exact broken index.
+  Proof: `packages/core/src/integrity.ts`,
+  `packages/core/test/integrity.test.ts`,
+  `packages/postgres/test/integrity-chain.test.ts`.
+- **Snapshots for long-lived runs**: materialized state plus a tail fold, with
+  the append-only history preserved.
+  Proof: `packages/core/test/snapshot.test.ts`,
+  `packages/sqlite/test/snapshot.test.ts`,
+  `packages/postgres/test/snapshot.test.ts`.
+- **Operator CLI** for start, list, inspect, signal, cancel, export, recover,
+  schedule, worker and serve, plus Prometheus metrics and health endpoints.
+  Proof: `packages/cli/src/cli.ts`,
+  `packages/cli/test/cli.e2e.test.ts`,
+  `packages/core/test/metrics.test.ts`.
+- **Executable order-system demo** with flaky payment, rollback, timeout,
+  manual review and external-effect evidence.
+  Proof: `examples/order-system/`,
+  `examples/order-system/test/services.test.ts`.
 
 ## Quick start
 
-Requires Node.js 22.5+ (tested in CI on Node 22 and Node 26).
+Requires Node.js 22.5+ (CI covers Node 22 and 26) and npm.
 
-```bash
+```sh
+git clone https://github.com/Sifr-Dev/continuum.git
+cd continuum
 npm install
 npm test
 npm run build
-npm run demo
+npm run demo        # http://localhost:4173
 ```
 
-Open the demo at <http://localhost:4173>.
+PostgreSQL-backed tests are enabled by pointing the suite at a database:
 
-The demo includes scenarios for:
-
-- **Happy path** — all DAG branches complete
-- **Flaky payment** — payment fails twice, retries with the same idempotency key, then succeeds
-- **Rollback saga** — inventory is reserved, payment permanently fails, inventory compensation runs in reverse order
-- **Timeout retry** — a slow payment attempt times out and is retried idempotently
-- **Manual review** — a high-value order waits for a durable operator approval; rejection rolls back inventory
-
-## Defining a workflow
-
-```ts
-import { defineStep, defineWorkflow } from "@continuum/core";
-
-const reserveInventory = defineStep<OrderInput, Reservation, CheckoutOutputs, Services>({
-  name: "reserveInventory",
-  needs: ["validateOrder"],
-  retry: { attempts: 4, delayMs: 100, strategy: "exponential" },
-  timeoutMs: 1_000,
-  execute: ({ input, context, idempotencyKey }) =>
-    context.inventory.reserve(idempotencyKey!, input),
-  compensate: ({ context, idempotencyKey, output }) =>
-    context.inventory.release(idempotencyKey!, output),
-});
-
-const chargePayment = defineStep<OrderInput, Payment, CheckoutOutputs, Services>({
-  name: "chargePayment",
-  needs: ["manualReview", "reserveInventory"],
-  retry: { attempts: 4, delayMs: 150 },
-  execute: ({ input, context, idempotencyKey }) =>
-    context.payments.charge(idempotencyKey!, input),
-  compensate: ({ context, idempotencyKey, output }) =>
-    context.payments.refund(idempotencyKey!, output),
-});
+```sh
+CONTINUUM_POSTGRES_TEST_URL=postgres://user@127.0.0.1:5432/continuum npm test
 ```
 
-A step receives:
+Without that variable, the PostgreSQL suites report as skipped rather than
+silently passing.
 
-| Field | Purpose |
-| --- | --- |
-| `input` | Durable workflow input |
-| `outputs` | Outputs of already completed dependency steps |
-| `context` | Application services supplied to the runtime |
-| `attempt` | 1-based attempt number |
-| `idempotencyKey` | Stable key for every retry of this step in this run |
-| `signal` | Abort signal for timeout/cancellation |
-| `signalPayload` | Latest durable payload for `waitForSignal` steps |
-| `emit` | Append a custom domain event to the run journal |
-| `startChildWorkflow` | Start or reattach to a deterministic child workflow |
+## Verification
 
-## Signals, timers, conditions, and child workflows
+Executed on 2026-11-28 on Linux x86-64 (Ryzen 7 7435HS, 16 threads, 15 GiB RAM),
+Node 26.13.1, npm 12.2.2, PostgreSQL 18.7:
 
-Durable signals pause a workflow without consuming a worker:
-
-```ts
-const approval = defineStep<Input, Approval, Outputs, Services>({
-  name: "approval",
-  waitForSignal: "order.review",
-  execute: ({ signalPayload }) => signalPayload as Approval,
-});
-
-await runtime.signalRun(runId, "order.review", { approved: true, reviewer: "ops" });
+```sh
+npm ci
+npm run typecheck
+CONTINUUM_POSTGRES_TEST_URL=postgres://sifr@127.0.0.1:55432/continuum npm test
+npm run build
+CONTINUUM_POSTGRES_TEST_URL=postgres://sifr@127.0.0.1:55432/continuum npm run bench
 ```
 
-Durable timers delay eligibility from the journal rather than holding a sleeping promise:
-
-```ts
-const cooldown = defineTimerStep("cooldown", 60_000);
-```
-
-Conditional steps skip cleanly while allowing downstream ordering dependencies to continue:
-
-```ts
-const manualReview = defineStep<Input, Approval, Outputs, Services>({
-  name: "manualReview",
-  needs: ["fraudScreen"],
-  waitForSignal: "order.review",
-  when: ({ outputs }) => outputs.fraudScreen?.risk === "review",
-  execute: ({ signalPayload }) => signalPayload as Approval,
-});
-```
-
-Child workflows use deterministic run IDs, so a parent retry reattaches instead of duplicating the child:
-
-```ts
-const childOutput = await startChildWorkflow<ChildInput, ChildOutput>(
-  childWorkflow,
-  childInput,
-);
-```
-
-## Distributed deployment with PostgreSQL
-
-Run any number of workers against the same PostgreSQL database:
-
-```bash
-continuum worker \
-  --workflows ./dist/workflows.js \
-  --postgres postgres://postgres:continuum@localhost:5432/continuum \
-  --lease-ttl 10000 \
-  --metrics-port 9090
-```
-
-Enqueue from an API process or another operator command:
-
-```bash
-continuum start checkout@1 \
-  --workflows ./dist/workflows.js \
-  --postgres postgres://postgres:continuum@localhost:5432/continuum \
-  --input '{"orderId":"ord_1"}'
-```
-
-Operational commands:
-
-```bash
-continuum list --postgres "$DATABASE_URL"
-continuum inspect <run-id> --postgres "$DATABASE_URL" --events
-continuum signal <run-id> order.review --postgres "$DATABASE_URL" --payload '{"approved":true}'
-continuum cancel <run-id> --postgres "$DATABASE_URL"
-continuum leases --postgres "$DATABASE_URL"
-continuum export --postgres "$DATABASE_URL" --out events.json
-```
-
-Worker coordination uses database-backed leases. Every execution write carries the worker fencing token and is verified in the same transaction as the event append. A zombie worker that loses its lease cannot complete a write after another worker takes ownership.
-
-## Embedded deployment with SQLite
-
-```ts
-import { WorkflowRuntime } from "@continuum/core";
-import { SqliteJournal } from "@continuum/sqlite";
-
-const journal = new SqliteJournal("./continuum.db");
-const runtime = new WorkflowRuntime({
-  journal,
-  context: services,
-  concurrency: 8,
-  workerId: "api-1",
-});
-
-runtime.registerWorkflow(checkoutWorkflow);
-await runtime.recover();
-
-const handle = await runtime.runWorkflow(checkoutWorkflow, order);
-const result = await handle.result;
-```
-
-SQLite is appropriate for embedded and single-node deployments. Use PostgreSQL for horizontally scaled workers.
-
-## Observability
-
-The worker can expose Prometheus-compatible metrics on localhost:
-
-```bash
-continuum worker --workflows ./dist/workflows.js --postgres "$DATABASE_URL" --metrics-port 9090
-```
-
-Endpoints:
-
-- `GET /health` — worker identity and liveness
-- `GET /metrics` — Prometheus text metrics for run statuses and active leases
-- `GET /runs` — JSON run summaries
-
-For application-specific telemetry, implement `RuntimeObserver`; every durable journal event can be forwarded to logs, metrics, tracing, or audit infrastructure.
-
-## Correctness model
-
-Continuum deliberately uses an **at-least-once execution** model. The framework cannot make a third-party API inherently exactly-once. What it can do is:
-
-1. persist the workflow intent before execution,
-2. transactionally reject duplicate run IDs,
-3. persist every observed outcome,
-4. give each step a stable idempotency key,
-5. avoid re-running steps with recorded successful outputs,
-6. use leases and fencing to prevent superseded workers from writing outcomes,
-7. retry interrupted or failed work from the last durable state,
-8. execute compensation when forward progress is impossible.
-
-Application steps that perform external effects should use the provided idempotency key in the downstream system. Compensation functions must also be idempotent because a worker can crash after performing a compensation but before recording its completion.
-
-## Tamper-evident history
-
-`IntegrityJournal` decorates any journal (memory, SQLite, Postgres) with a SHA-256 hash chain. Every appended event is stamped with a link that commits to its content and to the previous link, persisted inside the event payload so it survives restarts and needs no adapter changes. `verifyEventChain` (or `journal.verify()`) then proves the history has not been edited, reordered, truncated, or duplicated — any change is reported with the exact broken index. Appends are serialized through the decorator so concurrent writers cannot fork the chain, and a fresh decorator adopts the existing chain state after a restart. This makes tampering *detectable* end to end; it complements, and does not replace, database access controls.
-
-## Snapshots for long-lived runs
-
-`WorkflowRuntime.snapshotRun(runId)` materializes the projected run state at the current journal position and persists it through the journal (`saveRunSnapshot` / `latestRunSnapshot`, implemented by the memory, SQLite, and Postgres adapters, and forwarded by `IntegrityJournal`). `getRunWithSnapshot(runId)` then reads only events newer than the snapshot via `eventsAfter(runId, seq)` and folds that tail onto the materialized state, so read IO and fold cost scale with the tail rather than the full history. Pass `snapshotOnTerminal: true` to write a snapshot automatically when a run finishes.
-
-A benchmark over a 2,001-event run measured **10.4× faster** reads with a snapshot (0.038 ms → 0.004 ms per read) while reading **0 instead of 2,001** events. `getRun` itself is intentionally unchanged: the live scheduling hot path keeps its exact await ordering, and the optimized read is opt-in.
-
-The append-only event history is never truncated — snapshots are additive, so tamper-evident chains and full audit history remain intact.
+Observed: `npm run typecheck` exits 0; `npm test` runs **179 tests, 179 pass,
+0 fail, 0 skipped** across six workspaces (bench 1, CLI 31, core 101,
+PostgreSQL 18, SQLite 25, order-system demo 3); `npm run build` exits 0.
+The PostgreSQL suites that skip without a database all ran here.
 
 ## Architecture
 
-At a high level:
-
 ```text
-workflow definition
-       │
-       ▼
-runtime scheduler ── executes ready DAG nodes with concurrency control
-       │
-       ▼
-lease/fencing layer ── one owner per run; zombie writes rejected transactionally
-       │
-       ▼
-append-only journal ── run.created, step.started, step.succeeded, ...
-       │
-       ▼
-projection/reducer ── derives current run state for scheduling and operations
-       │
-       ▼
-recovery scan ── adopts non-terminal runs after lease expiry or restart
+packages/core       workflow model, scheduler, replay projection, retries,
+                    coordination, snapshots, integrity chain, memory journal
+packages/sqlite     embedded SQLite journal adapter
+packages/postgres   PostgreSQL journal with leases, fencing and migrations
+packages/cli        operator CLI (`continuum`) and rendering helpers
+packages/bench      reproducible throughput, adoption and append benchmarks
+examples/order-system  checkout demo, operations console, external-effect log
+docs/               architecture, operations and benchmark methodology
 ```
 
-See [docs/architecture.md](docs/architecture.md) for event semantics, state transitions, and design invariants.
+Execution path: workflow definition → ready-set scheduler → lease/fencing layer
+→ append-only journal → projection → recovery scan. See
+[docs/architecture.md](docs/architecture.md).
 
-## Current limitations
+## Benchmarks
 
-These are explicit design boundaries, not hidden caveats:
+Harness: `packages/bench/src/run.ts`, executed with `npm run bench`.
+Workload: 100 concurrent runs of a 6-step DAG with parallel branches and
+near-instant steps, so the numbers measure orchestration cost rather than
+application work. Adoption: 50 deferred runs drained by a fresh worker.
+Append latency: per journal append across the same run set. Absolute values are
+single-run observations, not repeated trials.
 
-- Workflow versioning exists, but automatic migration of in-flight runs across definition versions is not implemented.
-- Worker discovery uses periodic recovery polling rather than database change notifications, adding up to about one second of adoption latency.
-- Snapshots are additive: event history is never truncated, so storage still grows with run length even though reads stay cheap.
-- Leases reduce duplicate execution but do not make third-party side effects exactly-once; downstream idempotency is still required.
-- Cron schedules are evaluated in UTC only; per-schedule time zones are not yet supported.
-- The operations console is a demo application, not a packaged multi-tenant production UI.
-- The prototype has integration coverage but not yet large-scale soak, fault-injection, or performance benchmarks.
+Environment: AMD Ryzen 7 7435HS (16 threads), 15 GiB RAM, Linux 7.3.4, Node
+26.13.1, SQLite via `better-sqlite3`, PostgreSQL 18.7 on the same host.
 
-## Roadmap toward category leadership
+| backend | runs/sec | steps/sec | run latency p50 | p95 |
+| --- | --- | --- | --- | --- |
+| memory | 590.8 | 3,544.7 | 113.97 ms | 116.33 ms |
+| sqlite | 230.5 | 1,383.1 | 400.10 ms | 402.91 ms |
+| postgres | 143.7 | 862.4 | 651.95 ms | 668.39 ms |
 
-1. `LISTEN/NOTIFY` or logical-decoding-based wakeups for low-latency distributed scheduling
-2. Snapshot pruning/compaction with chain re-anchoring for very large journals
-3. Schedule pause/resume metadata and per-schedule time zones
-4. OpenTelemetry spans and exemplars in addition to Prometheus metrics
-5. Deterministic simulation time and chaos-test harness
-6. Packaged embeddable operations dashboard with authentication
-7. Deployment templates for Kubernetes, Terraform, and managed PostgreSQL
-8. Throughput benchmarks, backpressure controls, and batch journal writes
-9. Migration tooling for workflow definition evolution
+Orphaned-run adoption (50 runs):
 
-## Development
+| backend | wall time | runs/sec |
+| --- | --- | --- |
+| memory | 62.8 ms | 795.7 |
+| sqlite | 184.1 ms | 271.6 |
+| postgres | 292.4 ms | 171.0 |
 
-```bash
-npm install
-npm run typecheck
-npm test
-npm run build
-npm run demo
-```
+Journal append latency:
 
-CI runs typechecking, all unit/integration tests, and builds on Node 22 and 26 with a PostgreSQL 18 service.
+| backend | p50 | p95 | p99 |
+| --- | --- | --- | --- |
+| memory | 0 ms | 0.01 ms | 0.02 ms |
+| sqlite | 0.08 ms | 0.10 ms | 0.11 ms |
+| postgres | 0.93 ms | 1.16 ms | 1.37 ms |
+
+Limitations: one host, one run per backend, local PostgreSQL over loopback, and
+a synthetic DAG. These are regression baselines, not universal ceilings.
+
+## Limitations
+
+- At-least-once execution; third-party effects are not made exactly-once.
+  Downstream systems must honour the supplied idempotency key.
+- Workflow definition versioning exists, but automatic migration of in-flight
+  runs across versions is not implemented.
+- Worker discovery uses periodic recovery polling, adding up to roughly one
+  second of adoption latency.
+- Snapshots are additive; event history is never truncated, so storage grows
+  with run length even though reads stay cheap.
+- Cron schedules are evaluated in UTC only; per-schedule time zones are not
+  supported.
+- The operations console is a demo application, not a multi-tenant product UI.
+- No large-scale soak, fault-injection matrix or backpressure benchmark yet.
+- No licence file is present in this repository, so no reuse licence is granted.
+
+## Roadmap (NOT IMPLEMENTED)
+
+- `LISTEN/NOTIFY` or logical-decoding wakeups for low-latency distributed
+  scheduling.
+- Snapshot pruning/compaction with chain re-anchoring.
+- Schedule pause/resume and per-schedule time zones.
+- OpenTelemetry spans and exemplars in addition to Prometheus metrics.
+- Deterministic simulation time and a chaos-test harness.
+- Packaged operations dashboard with authentication.
+- Kubernetes, Terraform and managed-PostgreSQL deployment templates.
+- Batch journal writes and backpressure controls.
+- Migration tooling for workflow definition evolution.
