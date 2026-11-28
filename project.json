@@ -1,0 +1,9 @@
+{
+  "name": "continuum",
+  "description": "Durable-execution framework",
+  "stack": [
+    "npm"
+  ],
+  "status": "active",
+  "primary_language": "TypeScript"
+}
